@@ -1,3 +1,3 @@
-# WINQEMUFRONTEND visual identity
+# WinQEMUFrontend identity family
 
-Coordinated, original SVG identity for Virtual machine manager. Includes full-color icon, monochrome icon, horizontal lockup, social-banner vector and palette tokens. Export raster assets at specified sizes using any SVG renderer. This PR proposes art sources without changing runtime or existing icons.
+Polished blue desktop monitor and translucent virtual-machine cube. Includes transparent rendered PNG source crop, 16–1024px PNG exports, ICO, ICNS, wordmark and social banner. Replaces rejected thin-line SVG placeholders. Larger icon PNGs are upscaled from a ~248px generated contact-sheet crop, not native 1024px renders. Draft PR pending launcher-size validation, Windows resources and packaging integration.
