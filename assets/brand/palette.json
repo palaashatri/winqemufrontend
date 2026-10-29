@@ -1,0 +1,13 @@
+{
+  "name": "QEMU Frontend",
+  "category": "Windows virtual machine manager",
+  "background": [
+    "#3a5264",
+    "#1e3042"
+  ],
+  "accent": "#9dbed7",
+  "highlight": "#e2eef4",
+  "typography": "Inter, Segoe UI, Arial",
+  "style": "muted-metal / enamel / soft-depth",
+  "license": "original project artwork"
+}

@@ -1,5 +1,10 @@
 # winqemufrontend
 
+<img src="assets/brand/app-icon.svg" alt="QEMU Frontend icon" width="96" align="right" />
+
+[Icon, wordmark, and brand assets](assets/brand/README.md)
+
+
 A planned Windows-native consumer VM manager for QEMU (WinUI 3, C#), aiming to be the Windows equivalent of GNOME Boxes / UTM: create, install, run, snapshot and clone virtual machines without a terminal or QEMU syntax.
 
 **Status: specification only — there is no code yet.**
