@@ -1,0 +1,33 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.singleton.1.6.0.schema.json
+PackageIdentifier: WinQemu.Frontend
+PackageVersion: 1.0.0
+PackageLocale: en-US
+Publisher: WinQEMU Contributors
+PublisherUrl: https://github.com/palaashatri/winqemufrontend
+PackageName: WinQEMU — Virtual Machine Manager
+PackageUrl: https://github.com/palaashatri/winqemufrontend
+License: MIT
+ShortDescription: Windows-native WinUI 3 consumer-friendly and power-user virtual machine manager for stock QEMU.
+Description: >-
+  Create, install, run, snapshot, and clone virtual machines on Windows 11 across x86_64, i386,
+  ARM64 (aarch64), RISC-V 64 (riscv64), and PowerPC 64 (ppc64) without touching a terminal.
+  Supports WHPX hardware acceleration, TCG multi-arch emulation, UEFI/OVMF with per-VM NVRAM,
+  TPM 2.0 emulation, embedded localhost VNC display, QMP event-driven control, and QCOW2 snapshots.
+Tags:
+  - qemu
+  - virtualization
+  - virtual-machine
+  - whpx
+  - winui3
+  - hypervisor
+ManifestType: singleton
+ManifestVersion: 1.6.0
+Installers:
+  - Architecture: x64
+    InstallerType: zip
+    NestedInstallerType: portable
+    NestedInstallerFiles:
+      - RelativeFilePath: WinQemu.App.exe
+        PortableCommandAlias: winqemu
+    InstallerUrl: https://github.com/palaashatri/winqemufrontend/releases/download/v1.0.0/WinQemu-win-x64.zip
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000

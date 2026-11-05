@@ -34,6 +34,28 @@ No circular dependencies; `Core` must be unit-testable without XAML.
 
 When the solution exists, list the exact build/test/run commands in a **Commands** section here.
 
+## Commands
+
+```powershell
+# Restore & build the full solution
+dotnet build WinQemu.sln
+
+# Run all unit, fake-QMP, real-QEMU integration, and UI automation test suites
+dotnet test WinQemu.sln
+
+# Run individual test suites
+dotnet test tests/WinQemu.Tests.Unit/WinQemu.Tests.Unit.csproj
+dotnet test tests/WinQemu.Tests.FakeQmp/WinQemu.Tests.FakeQmp.csproj
+dotnet test tests/WinQemu.Tests.QemuIntegration/WinQemu.Tests.QemuIntegration.csproj
+dotnet test tests/WinQemu.Tests.UiAutomation/WinQemu.Tests.UiAutomation.csproj
+
+# Launch the WinUI 3 application (unpackaged desktop mode)
+dotnet run --project src/App/WinQemu.App.csproj
+
+# Run the automated visual & multi-architecture VM boot QA tour
+dotnet run --project src/App/WinQemu.App.csproj -- --qa-tour docs/qa-screenshots
+```
+
 ## Rules
 
 1. **Don't fake features** (§87): no buttons that do nothing, no fake QEMU status or metrics, never report WHPX while running TCG, no snapshot UI without real disk snapshots, no Secure Boot/TPM claims unless the firmware and a TPM emulator are actually configured. Unfinished features are hidden from release UI.

@@ -1,0 +1,36 @@
+name: WinQEMU CI
+
+on:
+  push:
+    branches: [ main, "agent/**", "comprehensive_visual_qa_pr" ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    name: Build & Test on Windows (windows-latest)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore dependencies
+        run: dotnet restore WinQemu.sln
+
+      - name: Build solution (Release)
+        run: dotnet build WinQemu.sln --configuration Release --no-restore
+
+      - name: Run Unit & Fake QMP Protocol Tests
+        run: |
+          dotnet test tests/WinQemu.Tests.Unit/WinQemu.Tests.Unit.csproj --configuration Release --no-build --verbosity normal
+          dotnet test tests/WinQemu.Tests.FakeQmp/WinQemu.Tests.FakeQmp.csproj --configuration Release --no-build --verbosity normal
+          dotnet test tests/WinQemu.Tests.UiAutomation/WinQemu.Tests.UiAutomation.csproj --configuration Release --no-build --verbosity normal
+
+      - name: Run Real-QEMU Integration Suite (if QEMU present)
+        run: dotnet test tests/WinQemu.Tests.QemuIntegration/WinQemu.Tests.QemuIntegration.csproj --configuration Release --no-build --verbosity normal

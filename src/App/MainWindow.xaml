@@ -1,0 +1,794 @@
+<Window
+    x:Class="WinQemu.App.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:WinQemu.App.ViewModels"
+    Title="WinQEMU — Virtual Machine Manager">
+
+    <Grid x:Name="MainRootGrid" SizeChanged="OnMainRootSizeChanged" AllowDrop="True" DragOver="OnMainRootDragOver" Drop="OnMainRootDrop">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="44" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="32" />
+        </Grid.RowDefinitions>
+
+        <!-- Row 0: Native Integrated Title Bar Region (§4, §85) -->
+        <Border x:Name="CustomTitleBar" Grid.Row="0" Background="Transparent" Padding="14,0,148,0">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                    <Image x:Name="TitleBarBrandIcon" Width="22" Height="22" Stretch="Uniform" />
+                    <TextBlock Text="WinQEMU" FontWeight="SemiBold" FontSize="14" VerticalAlignment="Center" />
+                    <TextBlock x:Name="TitleBarSubtitle" Text="Virtual Machine Manager for Windows 11" Opacity="0.65" FontSize="12" VerticalAlignment="Center" />
+                </StackPanel>
+
+                <!-- Status Pills in Title Bar -->
+                <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <Border x:Name="WhpxStatusPill" Background="#1A4F8DFA" BorderBrush="#4F8DFA" BorderThickness="1" CornerRadius="12" Padding="10,3">
+                        <TextBlock x:Name="WhpxStatusPillText" Text="Hardware Acceleration: Probing..." FontSize="11" FontWeight="SemiBold" />
+                    </Border>
+                    <Border Background="#1A3FB950" BorderBrush="#3FB950" BorderThickness="1" CornerRadius="12" Padding="10,3">
+                        <TextBlock x:Name="QemuVersionPillText" Text="QEMU Runtime" FontSize="11" FontWeight="SemiBold" />
+                    </Border>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- Row 1: Action Command Bar & Navigation Tabs -->
+        <Border Grid.Row="1" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,1,0,1" Padding="16,10" Background="{ThemeResource LayerFillColorDefaultBrush}">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <!-- Primary Navigation Buttons -->
+                <ScrollViewer HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled">
+                    <StackPanel Orientation="Horizontal" Spacing="6" AutomationProperties.AutomationId="PrimaryNavigationBar">
+                        <Button x:Name="NavHomeBtn" Content="🏠 Home Library" Click="OnNavHomeClick" AutomationProperties.AutomationId="NavHomeBtn" AutomationProperties.Name="Home Virtual Machine Library" ToolTipService.ToolTip="View all virtual machines (Alt+1)">
+                            <Button.KeyboardAccelerators>
+                                <KeyboardAccelerator Modifiers="Menu" Key="Number1" />
+                            </Button.KeyboardAccelerators>
+                        </Button>
+                        <Button x:Name="NavConsoleBtn" Content="🖥 Guest Display" Click="OnNavConsoleClick" AutomationProperties.AutomationId="NavConsoleBtn" AutomationProperties.Name="Embedded Guest Display Console" ToolTipService.ToolTip="Open embedded guest framebuffer console (Alt+2)">
+                            <Button.KeyboardAccelerators>
+                                <KeyboardAccelerator Modifiers="Menu" Key="Number2" />
+                            </Button.KeyboardAccelerators>
+                        </Button>
+                        <Button x:Name="NavWizardBtn" Content="＋ New VM" Click="OnNavWizardClick" Style="{StaticResource AccentButtonStyle}" AutomationProperties.AutomationId="NavWizardBtn" AutomationProperties.Name="Create New Virtual Machine" ToolTipService.ToolTip="Create a new virtual machine from ISO or preset (Ctrl+N)">
+                            <Button.KeyboardAccelerators>
+                                <KeyboardAccelerator Modifiers="Control" Key="N" />
+                            </Button.KeyboardAccelerators>
+                        </Button>
+                        <Button x:Name="NavHardwareBtn" Content="⚙ Hardware Editor" Click="OnNavHardwareClick" AutomationProperties.AutomationId="NavHardwareBtn" AutomationProperties.Name="Advanced Hardware Editor" ToolTipService.ToolTip="Configure CPU, RAM, disks, network, UEFI, TPM, and raw QEMU args" />
+                        <Button x:Name="NavSnapshotsBtn" Content="⏱ Snapshots &amp; Clone" Click="OnNavSnapshotsClick" AutomationProperties.AutomationId="NavSnapshotsBtn" AutomationProperties.Name="Snapshots and Cloning" ToolTipService.ToolTip="Manage snapshots, full clones, and linked clones" />
+                        <Button x:Name="NavDownloadsBtn" Content="🌐 Multi-Arch &amp; Downloads" Click="OnNavDownloadsClick" AutomationProperties.AutomationId="NavDownloadsBtn" AutomationProperties.Name="Multi-Architecture Lab and OS Downloads" ToolTipService.ToolTip="Download official distros or provision bootable multi-architecture VMs" />
+                        <Button x:Name="NavSettingsBtn" Content="🔧 Settings &amp; Diagnostics" Click="OnNavSettingsClick" AutomationProperties.AutomationId="NavSettingsBtn" AutomationProperties.Name="Settings and Diagnostics" ToolTipService.ToolTip="Global preferences, WHPX status, QEMU runtime, and diagnostics" />
+                    </StackPanel>
+                </ScrollViewer>
+
+                <!-- Search & View Switcher -->
+                <StackPanel x:Name="HeaderRightControls" Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <TextBox x:Name="SearchBox"
+                             Width="220"
+                             PlaceholderText="Search VMs by name, OS, arch..."
+                             TextChanged="OnSearchBoxTextChanged"
+                             AutomationProperties.AutomationId="VmSearchBox"
+                             AutomationProperties.Name="Search Virtual Machines" />
+                    <Button x:Name="QuickShowcaseBtn"
+                            Content="⚡ Provision Multi-Arch VMs"
+                            Click="OnProvisionShowcaseClick"
+                            AutomationProperties.AutomationId="ProvisionMultiArchBtn"
+                            AutomationProperties.Name="Provision Bootable Linux, FreeBSD, Windows, and macOS VMs across all architectures"
+                            ToolTipService.ToolTip="Populate bootable Linux, FreeBSD, Windows, and macOS VMs across x86_64, i386, ARM64, RISC-V 64, and PowerPC 64" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- Row 2: Main Content Workspace -->
+        <Grid Grid.Row="2" Padding="18,14">
+
+            <!-- ==================== VIEW 1: HOME VM LIBRARY ==================== -->
+            <Grid x:Name="LibraryViewPanel" Visibility="Visible">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <!-- Acceleration / Info Banner -->
+                <Border x:Name="HomeAccelBanner" Grid.Row="0" Margin="0,0,0,12" Padding="14,10" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Spacing="2">
+                            <TextBlock x:Name="BannerHeadlineText" Text="Virtual Machines" FontSize="18" FontWeight="SemiBold" />
+                            <TextBlock x:Name="BannerDetailText" Text="Create, boot, snapshot, and clone virtual machines across x86_64, i386, ARM64, RISC-V 64, and PowerPC 64 without opening a terminal." Opacity="0.78" FontSize="12" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                            <Button x:Name="EnableWhpxBannerBtn" Content="Enable WHPX" Click="OnEnableWhpxClick" Visibility="Collapsed" AutomationProperties.Name="Enable Windows Hypervisor Platform" />
+                            <Button x:Name="ImportQvmBtn" Content="📥 Import .qvm / Disk" Click="OnImportDiskOrPackageClick" AutomationProperties.Name="Import Portable VM or Disk Image" />
+                        </StackPanel>
+                    </Grid>
+                </Border>
+
+                <!-- VM Grid View -->
+                <GridView x:Name="VmGridView"
+                          Grid.Row="1"
+                          SelectionMode="Single"
+                          SelectionChanged="OnVmGridSelectionChanged"
+                          AutomationProperties.AutomationId="VmLibraryGridView"
+                          AutomationProperties.Name="Virtual Machines Library">
+                    <GridView.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <ItemsWrapGrid Orientation="Horizontal" MaximumRowsOrColumns="4" />
+                        </ItemsPanelTemplate>
+                    </GridView.ItemsPanel>
+                    <GridView.ItemTemplate>
+                        <DataTemplate x:DataType="vm:VmCardItem">
+                            <Border Width="330"
+                                    Margin="6"
+                                    Padding="16"
+                                    CornerRadius="10"
+                                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                    BorderThickness="1">
+                                <StackPanel Spacing="10">
+                                    <!-- Card Top Row: OS Badge + Live Status -->
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Spacing="2">
+                                            <TextBlock Text="{x:Bind Name, Mode=OneWay}" FontWeight="SemiBold" FontSize="15" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock Text="{x:Bind ArchitectureBadge, Mode=OneWay}" FontSize="11" Opacity="0.72" />
+                                        </StackPanel>
+                                        <Border Grid.Column="1" Background="#224F8DFA" BorderBrush="#4F8DFA" BorderThickness="1" CornerRadius="10" Padding="8,2" VerticalAlignment="Top">
+                                            <TextBlock Text="{x:Bind StatusBadgeText, Mode=OneWay}" FontSize="11" FontWeight="SemiBold" />
+                                        </Border>
+                                    </Grid>
+
+                                    <!-- Guest Screen Preview / Live Framebuffer Thumbnail (§39) -->
+                                    <Border Height="104" CornerRadius="6" Background="#0A0E14" BorderBrush="#263040" BorderThickness="1">
+                                        <Grid>
+                                            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="4" Padding="10">
+                                                <TextBlock Text="{x:Bind OsDisplayName, Mode=OneWay}" Foreground="#58A6FF" FontWeight="SemiBold" FontSize="13" HorizontalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                                <TextBlock Text="{x:Bind ResourceSummary, Mode=OneWay}" Foreground="#8B949E" FontSize="11" HorizontalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                            </StackPanel>
+                                            <Image Source="{x:Bind ThumbnailSource, Mode=OneWay}" Stretch="UniformToFill" />
+                                            <Border VerticalAlignment="Bottom" Background="#CC0A0E14" Padding="8,3">
+                                                <TextBlock Text="{x:Bind ResourceSummary, Mode=OneWay}" Foreground="#C9D1D9" FontSize="10" HorizontalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                            </Border>
+                                        </Grid>
+                                    </Border>
+
+                                    <!-- Card Actions Row (§40) -->
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <Button Content="{x:Bind PrimaryActionText, Mode=OneWay}"
+                                                Tag="{x:Bind}"
+                                                Click="OnCardPrimaryActionClick"
+                                                HorizontalAlignment="Stretch"
+                                                Style="{StaticResource AccentButtonStyle}"
+                                                AutomationProperties.Name="Start or Open Virtual Machine" />
+                                        <Button Grid.Column="1" Margin="6,0,0,0" Content="⚙" Tag="{x:Bind}" Click="OnCardHardwareClick" ToolTipService.ToolTip="Edit VM Hardware" AutomationProperties.Name="Edit VM Hardware" />
+                                        <Button Grid.Column="2" Margin="6,0,0,0" Content="⏱" Tag="{x:Bind}" Click="OnCardSnapshotsClick" ToolTipService.ToolTip="Snapshots and Clone" AutomationProperties.Name="Snapshots and Clone" />
+                                        <Button Grid.Column="3" Margin="6,0,0,0" Content="⋯" Tag="{x:Bind}" AutomationProperties.Name="More VM Actions" ToolTipService.ToolTip="More VM Actions">
+                                            <Button.Flyout>
+                                                <MenuFlyout>
+                                                    <MenuFlyoutItem Text="Open Embedded Display" Tag="{x:Bind}" Click="OnCardOpenDisplayClick" />
+                                                    <MenuFlyoutItem Text="Detach into Separate Window" Tag="{x:Bind}" Click="OnCardDetachWindowClick" />
+                                                    <MenuFlyoutSeparator />
+                                                    <MenuFlyoutItem Text="Pause / Resume" Tag="{x:Bind}" Click="OnCardPauseResumeClick" />
+                                                    <MenuFlyoutItem Text="Restart Guest" Tag="{x:Bind}" Click="OnCardRestartClick" />
+                                                    <MenuFlyoutItem Text="Shut Down Gracefully" Tag="{x:Bind}" Click="OnCardShutDownClick" />
+                                                    <MenuFlyoutItem Text="Force Stop (Power Off)" Tag="{x:Bind}" Click="OnCardForceStopClick" />
+                                                    <MenuFlyoutSeparator />
+                                                    <MenuFlyoutItem Text="Snapshots &amp; Restore..." Tag="{x:Bind}" Click="OnCardSnapshotsClick" />
+                                                    <MenuFlyoutItem Text="Clone Virtual Machine..." Tag="{x:Bind}" Click="OnCardSnapshotsClick" />
+                                                    <MenuFlyoutItem Text="Hardware Settings..." Tag="{x:Bind}" Click="OnCardHardwareClick" />
+                                                    <MenuFlyoutItem Text="Export Portable .qvm..." Tag="{x:Bind}" Click="OnCardExportClick" />
+                                                    <MenuFlyoutSeparator />
+                                                    <MenuFlyoutItem Text="Delete Virtual Machine" Tag="{x:Bind}" Click="OnCardDeleteClick" />
+                                                </MenuFlyout>
+                                            </Button.Flyout>
+                                        </Button>
+                                    </Grid>
+                                </StackPanel>
+                            </Border>
+                        </DataTemplate>
+                    </GridView.ItemTemplate>
+                </GridView>
+            </Grid>
+
+            <!-- ==================== VIEW 2: EMBEDDED GUEST DISPLAY CONSOLE (§28–§35, §52–§53) ==================== -->
+            <Grid x:Name="ConsoleViewPanel" Visibility="Collapsed" KeyDown="OnConsoleKeyDown" KeyUp="OnConsoleKeyUp" IsTabStop="True">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <!-- Console Toolbar -->
+                <Border Grid.Row="0" Padding="12,8" CornerRadius="8,8,0,0" Background="#161B22" BorderBrush="#30363D" BorderThickness="1,1,1,0">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+
+                        <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                            <ComboBox x:Name="ConsoleVmSelector"
+                                      Width="280"
+                                      SelectionChanged="OnConsoleVmSelectorChanged"
+                                      DisplayMemberPath="Name"
+                                      AutomationProperties.AutomationId="ConsoleVmSelector"
+                                      AutomationProperties.Name="Active Virtual Machine in Console" />
+                            <Border Background="#1F6FEB" CornerRadius="4" Padding="8,4" VerticalAlignment="Center">
+                                <TextBlock x:Name="ConsoleAccelBadge" Text="TCG / WHPX" Foreground="White" FontSize="11" FontWeight="SemiBold" />
+                            </Border>
+                            <TextBlock x:Name="ConsoleStateText" Text="Stopped" Foreground="#8B949E" VerticalAlignment="Center" FontSize="12" />
+                        </StackPanel>
+
+                        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6">
+                            <Button x:Name="ConsoleStartStopBtn" Content="▶ Start VM" Click="OnConsoleStartStopClick" Style="{StaticResource AccentButtonStyle}" AutomationProperties.AutomationId="ConsoleStartStopBtn" AutomationProperties.Name="Start or Shut Down VM" />
+                            <Button x:Name="ConsolePauseBtn" Content="⏸ Pause" Click="OnConsolePauseClick" AutomationProperties.Name="Pause or Resume VM" />
+                            <Button Content="↻ Reset" Click="OnConsoleResetClick" AutomationProperties.Name="Reset VM" />
+                            <Button Content="⚡ Force Off" Click="OnConsoleForceOffClick" AutomationProperties.Name="Force Stop VM" />
+                            <Button Content="💿 CD/ISO ▾" AutomationProperties.Name="Removable CD/DVD ISO Menu">
+                                <Button.Flyout>
+                                    <MenuFlyout>
+                                        <MenuFlyoutItem x:Name="CurrentIsoMenuText" Text="ISO: Attached" IsEnabled="False" />
+                                        <MenuFlyoutSeparator />
+                                        <MenuFlyoutItem Text="Choose ISO Image..." Click="OnConsoleChangeIsoClick" />
+                                        <MenuFlyoutItem Text="Eject CD/DVD Media" Click="OnConsoleEjectIsoClick" />
+                                    </MenuFlyout>
+                                </Button.Flyout>
+                            </Button>
+                            <ComboBox x:Name="ScalingModeCombo" SelectedIndex="0" SelectionChanged="OnScalingModeChanged" Width="125" AutomationProperties.Name="Display Scaling Mode">
+                                <ComboBoxItem Content="Fit Aspect" />
+                                <ComboBoxItem Content="Stretch" />
+                                <ComboBoxItem Content="1:1 Pixel" />
+                            </ComboBox>
+                            <Button Content="📷 Capture" Click="OnConsoleCaptureScreenshotClick" AutomationProperties.AutomationId="ConsoleCaptureBtn" AutomationProperties.Name="Capture Guest Screenshot" ToolTipService.ToolTip="Save guest framebuffer screenshot to PNG" />
+                            <Button Content="⧉ Detach" Click="OnConsoleDetachWindowClick" AutomationProperties.Name="Detach VM into Separate Window" ToolTipService.ToolTip="Open this VM in a standalone window" />
+                            <Button Content="⛶ Fullscreen" Click="OnConsoleFullscreenClick" AutomationProperties.Name="Toggle Fullscreen Display" />
+                            <ToggleButton x:Name="ToggleDevDrawerBtn" Content=">_ Serial &amp; QMP" Click="OnToggleDevDrawerClick" IsChecked="True" AutomationProperties.Name="Toggle Serial Console and QMP Inspector Drawer" />
+                        </StackPanel>
+                    </Grid>
+                </Border>
+
+                <!-- Center Framebuffer + Optional Serial/QMP Side Drawer -->
+                <Grid Grid.Row="1" Background="#05070A">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition x:Name="DevDrawerColumn" Width="380" />
+                    </Grid.ColumnDefinitions>
+
+                    <!-- Framebuffer Viewport -->
+                    <Border Grid.Column="0" BorderBrush="#30363D" BorderThickness="1,0,1,0" Background="#05070A" Padding="8">
+                        <Grid>
+                            <Image x:Name="EmbeddedFramebufferImage"
+                                   Stretch="Uniform"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center"
+                                   PointerPressed="OnEmbeddedViewportPointerPressed"
+                                   PointerMoved="OnEmbeddedViewportPointerMoved"
+                                   PointerReleased="OnEmbeddedViewportPointerReleased" />
+
+                            <Border x:Name="EmbeddedDisplayOverlay"
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Center"
+                                    Padding="24,18"
+                                    CornerRadius="10"
+                                    Background="#CC161B22"
+                                    BorderBrush="#30363D"
+                                    BorderThickness="1">
+                                <StackPanel Spacing="10" HorizontalAlignment="Center">
+                                    <TextBlock x:Name="EmbeddedOverlayTitle" Text="Guest Display Ready" FontSize="16" FontWeight="SemiBold" Foreground="#F0F6FC" HorizontalAlignment="Center" />
+                                    <TextBlock x:Name="EmbeddedOverlaySubtitle" Text="Press '▶ Start VM' to boot the selected virtual machine inside this embedded framebuffer." FontSize="12" Foreground="#8B949E" HorizontalAlignment="Center" TextAlignment="Center" MaxWidth="420" TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+                    </Border>
+
+                    <!-- Developer Serial Console & QMP Inspector Drawer (§51–§53) -->
+                    <Border x:Name="DevDrawerPanel" Grid.Column="1" Background="#0D1117" BorderBrush="#30363D" BorderThickness="0,0,1,0" Padding="12">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+
+                            <!-- Serial Console (§52) -->
+                            <Grid Grid.Row="0" Margin="0,0,0,8">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="*" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <TextBlock Text="SERIAL CONSOLE (COM1 / UART)" FontSize="11" FontWeight="SemiBold" Foreground="#58A6FF" Margin="0,0,0,4" />
+                                <Border Grid.Row="1" Background="#05070A" BorderBrush="#21262D" BorderThickness="1" CornerRadius="6" Padding="8">
+                                    <ScrollViewer>
+                                        <TextBlock x:Name="SerialConsoleOutputText"
+                                                   FontFamily="Consolas"
+                                                   FontSize="11.5"
+                                                   Foreground="#3FB950"
+                                                   TextWrapping="Wrap"
+                                                   IsTextSelectionEnabled="True"
+                                                   Text="[Serial console connected on loopback socket]" />
+                                    </ScrollViewer>
+                                </Border>
+                                <Grid Grid.Row="2" Margin="0,6,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox x:Name="SerialInputBox" PlaceholderText="Send serial input..." FontFamily="Consolas" FontSize="12" AutomationProperties.Name="Serial Console Input" />
+                                    <Button Grid.Column="1" Margin="6,0,0,0" Content="Send" Click="OnSendSerialInputClick" AutomationProperties.Name="Send Serial Command" />
+                                </Grid>
+                            </Grid>
+
+                            <!-- QMP Inspector (§53) -->
+                            <Grid Grid.Row="1" Margin="0,8,0,0">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="*" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <TextBlock Text="QMP PROTOCOL INSPECTOR" FontSize="11" FontWeight="SemiBold" Foreground="#D2A8FF" Margin="0,0,0,4" />
+                                <Border Grid.Row="1" Background="#05070A" BorderBrush="#21262D" BorderThickness="1" CornerRadius="6" Padding="8">
+                                    <ScrollViewer>
+                                        <TextBlock x:Name="QmpInspectorOutputText"
+                                                   FontFamily="Consolas"
+                                                   FontSize="11"
+                                                   Foreground="#E6EDF3"
+                                                   TextWrapping="Wrap"
+                                                   IsTextSelectionEnabled="True"
+                                                   Text="> query-status" />
+                                    </ScrollViewer>
+                                </Border>
+                                <Grid Grid.Row="2" Margin="0,6,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox x:Name="QmpCommandInputBox" Text="query-status" FontFamily="Consolas" FontSize="12" AutomationProperties.Name="QMP Inspector Command Input" />
+                                    <Button Grid.Column="1" Margin="6,0,0,0" Content="Run QMP" Click="OnExecuteQmpInspectorClick" AutomationProperties.Name="Execute QMP Command" />
+                                </Grid>
+                            </Grid>
+                        </Grid>
+                    </Border>
+                </Grid>
+
+                <!-- Console Footer Metrics Bar (§55) -->
+                <Border Grid.Row="2" Padding="14,6" CornerRadius="0,0,8,8" Background="#161B22" BorderBrush="#30363D" BorderThickness="1">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock x:Name="ConsoleFooterLeftText" Text="Localhost VNC Transport (127.0.0.1) · Host Key: Ctrl+Alt" Foreground="#8B949E" FontSize="12" />
+                        <TextBlock Grid.Column="1" x:Name="ConsoleFooterMetricsText" Text="Configured RAM: 512 MiB · Host Working Set: 0 MiB · Host CPU: 0.0%" Foreground="#8B949E" FontSize="12" />
+                    </Grid>
+                </Border>
+            </Grid>
+
+            <!-- ==================== VIEW 3: EXPRESS NEW VM WIZARD (§13–§16, §37) ==================== -->
+            <ScrollViewer x:Name="WizardViewPanel" Visibility="Collapsed">
+                <Border MaxWidth="880" HorizontalAlignment="Stretch" Padding="24" CornerRadius="10" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <StackPanel Spacing="16">
+                        <TextBlock Text="Create a Virtual Machine" FontSize="22" FontWeight="SemiBold" />
+                        <TextBlock Text="Pick an installer ISO or choose an operating system preset across x86_64, i386, ARM64, RISC-V 64, or PowerPC 64. WinQEMU configures firmware, storage, networking, and acceleration automatically." Opacity="0.78" TextWrapping="Wrap" />
+
+                        <!-- Step 1: ISO Selection & Auto-Recognition (§13, §14) -->
+                        <Border Padding="16" CornerRadius="8" Background="{ThemeResource LayerFillColorAltBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                            <StackPanel Spacing="10">
+                                <TextBlock Text="1. Installer Media (Optional — or boot from preconfigured preset)" FontWeight="SemiBold" />
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox x:Name="WizardIsoPathBox"
+                                             PlaceholderText="Path to .iso installer image (or drag &amp; drop an ISO onto the window)..."
+                                             TextChanged="OnWizardIsoPathChanged"
+                                             AutomationProperties.AutomationId="WizardIsoPathBox"
+                                             AutomationProperties.Name="Installer ISO Path" />
+                                    <Button Grid.Column="1" Margin="8,0,0,0" Content="Browse ISO..." Click="OnWizardBrowseIsoClick" AutomationProperties.Name="Browse for Installer ISO" />
+                                </Grid>
+                                <TextBlock x:Name="WizardIsoRecognitionText" Text="Select an ISO to automatically detect Windows, Linux, BSD, or macOS and its target architecture." FontSize="12" Foreground="#4F8DFA" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Step 2: Operating System & Architecture Preset (§15) -->
+                        <Border Padding="16" CornerRadius="8" Background="{ThemeResource LayerFillColorAltBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                            <StackPanel Spacing="10">
+                                <TextBlock Text="2. Operating System &amp; Architecture Preset" FontWeight="SemiBold" />
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Margin="0,0,8,0" Spacing="4">
+                                        <TextBlock Text="Guest Preset" FontSize="12" Opacity="0.8" />
+                                        <ComboBox x:Name="WizardPresetCombo"
+                                                  HorizontalAlignment="Stretch"
+                                                  DisplayMemberPath="DisplayName"
+                                                  SelectionChanged="OnWizardPresetSelectionChanged"
+                                                  AutomationProperties.AutomationId="WizardPresetCombo"
+                                                  AutomationProperties.Name="Operating System Preset" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1" Margin="8,0,0,0" Spacing="4">
+                                        <TextBlock Text="Virtual Machine Name" FontSize="12" Opacity="0.8" />
+                                        <TextBox x:Name="WizardVmNameBox"
+                                                 Text="Ubuntu Linux"
+                                                 AutomationProperties.AutomationId="WizardVmNameBox"
+                                                 AutomationProperties.Name="Virtual Machine Name" />
+                                    </StackPanel>
+                                </Grid>
+                                <TextBlock x:Name="WizardPresetSummaryText" Text="Modern VirtIO storage, network &amp; GPU · UEFI" FontSize="12" Opacity="0.75" />
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Step 3: Recommended Resources (§16) -->
+                        <Border Padding="16" CornerRadius="8" Background="{ThemeResource LayerFillColorAltBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                            <StackPanel Spacing="12">
+                                <TextBlock Text="3. Hardware Resources (Memory, CPU, Disk Size)" FontWeight="SemiBold" />
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Margin="0,0,8,0" Spacing="4">
+                                        <TextBlock x:Name="WizardRamLabel" Text="Memory (MiB) — Recommended: 4096 MiB" FontSize="12" />
+                                        <Slider x:Name="WizardRamSlider" Minimum="256" Maximum="16384" StepFrequency="256" Value="4096" ValueChanged="OnWizardResourceSliderChanged" AutomationProperties.AutomationId="WizardRamSlider" AutomationProperties.Name="Memory Allocation MiB" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1" Margin="8,0,8,0" Spacing="4">
+                                        <TextBlock x:Name="WizardCpuLabel" Text="Virtual CPUs — Recommended: 4" FontSize="12" />
+                                        <Slider x:Name="WizardCpuSlider" Minimum="1" Maximum="16" StepFrequency="1" Value="4" ValueChanged="OnWizardResourceSliderChanged" AutomationProperties.AutomationId="WizardCpuSlider" AutomationProperties.Name="Virtual CPU Cores" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="2" Margin="8,0,0,0" Spacing="4">
+                                        <TextBlock x:Name="WizardDiskLabel" Text="Virtual Disk (GiB) — Recommended: 32 GiB" FontSize="12" />
+                                        <Slider x:Name="WizardDiskSlider" Minimum="4" Maximum="256" StepFrequency="4" Value="32" ValueChanged="OnWizardResourceSliderChanged" AutomationProperties.AutomationId="WizardDiskSlider" AutomationProperties.Name="Disk Size GiB" />
+                                    </StackPanel>
+                                </Grid>
+                                <TextBlock x:Name="WizardResourceWarningText" Text="" Foreground="#F0883E" FontSize="12" Visibility="Collapsed" />
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Step 4: Express Unattended Installation (§37) -->
+                        <Border Padding="16" CornerRadius="8" Background="{ThemeResource LayerFillColorAltBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                            <StackPanel Spacing="10">
+                                <CheckBox x:Name="WizardExpressInstallCheck"
+                                          Content="Enable Express Unattended Installation (Cloud-Init / Windows Autounattend seed ISO)"
+                                          AutomationProperties.AutomationId="WizardExpressInstallCheck" />
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox x:Name="WizardUsernameBox" Header="Guest Username" Text="user" Margin="0,0,6,0" />
+                                    <TextBox x:Name="WizardHostnameBox" Grid.Column="1" Header="Guest Hostname" Text="winqemu-vm" Margin="6,0,6,0" />
+                                    <PasswordBox x:Name="WizardPasswordBox" Grid.Column="2" Header="Optional Password (never logged)" Margin="6,0,0,0" />
+                                </Grid>
+                                <CheckBox x:Name="WizardWin11BypassCheck"
+                                          Content="Include setup-time Windows 11 LabConfig requirement bypass (when software TPM emulator is not installed)"
+                                          IsChecked="True" />
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Create Actions -->
+                        <StackPanel Orientation="Horizontal" Spacing="10" HorizontalAlignment="Right">
+                            <Button Content="Cancel" Click="OnNavHomeClick" />
+                            <Button x:Name="WizardCreateOnlyBtn" Content="Create Virtual Machine" Click="OnWizardCreateClick" AutomationProperties.AutomationId="WizardCreateOnlyBtn" />
+                            <Button x:Name="WizardCreateAndStartBtn" Content="▶ Create &amp; Start VM" Click="OnWizardCreateAndStartClick" Style="{StaticResource AccentButtonStyle}" AutomationProperties.AutomationId="WizardCreateAndStartBtn" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+            </ScrollViewer>
+
+            <!-- ==================== VIEW 4: ADVANCED HARDWARE EDITOR (§17, §18, §27) ==================== -->
+            <ScrollViewer x:Name="HardwareViewPanel" Visibility="Collapsed">
+                <Border MaxWidth="960" HorizontalAlignment="Stretch" Padding="24" CornerRadius="10" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <StackPanel Spacing="16">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock x:Name="HwEditorHeaderText" Text="Advanced Hardware Editor" FontSize="22" FontWeight="SemiBold" />
+                                <TextBlock Text="Inspect and customize system architecture, machine chipset, CPU topology, UEFI/Secure Boot, TPM 2.0, storage buses, port forwarding, and raw QEMU flags." Opacity="0.78" FontSize="12" />
+                            </StackPanel>
+                            <Button Grid.Column="1" Content="💾 Save Hardware Changes" Click="OnSaveHardwareEditorClick" Style="{StaticResource AccentButtonStyle}" AutomationProperties.AutomationId="SaveHardwareBtn" />
+                        </Grid>
+
+                        <!-- System, CPU, Memory, Firmware Row -->
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Margin="0,0,8,0" Spacing="8">
+                                <TextBox x:Name="HwNameBox" Header="VM Name" />
+                                <TextBox x:Name="HwMachineTypeBox" Header="Machine Type (q35, pc, virt, mac99)" />
+                                <TextBox x:Name="HwCpuModelBox" Header="CPU Model (max, qemu64, cortex-a72, rv64)" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Margin="8,0,8,0" Spacing="8">
+                                <TextBox x:Name="HwVcpuCountBox" Header="vCPU Cores" />
+                                <TextBox x:Name="HwMemoryMiBBox" Header="Memory (MiB)" />
+                                <ComboBox x:Name="HwAcceleratorCombo" Header="Accelerator Mode" HorizontalAlignment="Stretch">
+                                    <ComboBoxItem Content="Auto (Prefer WHPX, fallback TCG)" />
+                                    <ComboBoxItem Content="WHPX (Hardware Accelerated)" />
+                                    <ComboBoxItem Content="TCG (Software Emulation)" />
+                                </ComboBox>
+                            </StackPanel>
+                            <StackPanel Grid.Column="2" Margin="8,0,0,0" Spacing="8">
+                                <ComboBox x:Name="HwFirmwareCombo" Header="Firmware Type" HorizontalAlignment="Stretch">
+                                    <ComboBoxItem Content="UEFI (OVMF / EDK2)" />
+                                    <ComboBoxItem Content="Legacy BIOS (SeaBIOS)" />
+                                    <ComboBoxItem Content="OpenBIOS (PowerPC / SPARC)" />
+                                    <ComboBoxItem Content="OpenSBI (RISC-V)" />
+                                </ComboBox>
+                                <TextBox x:Name="HwGpuModelBox" Header="Virtual GPU (virtio-vga, bochs-display, VGA, virtio-gpu-pci)" />
+                                <TextBox x:Name="HwStorageBusBox" Header="Primary Storage Bus (virtio-blk, sata, nvme, ide)" />
+                            </StackPanel>
+                        </Grid>
+
+                        <!-- Security, Developer & Direct Kernel Boot (§17, §23, §24, §51) -->
+                        <Border Padding="14" CornerRadius="8" Background="{ThemeResource LayerFillColorAltBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                            <StackPanel Spacing="8">
+                                <TextBlock Text="Security, Firmware Isolation &amp; Developer Mode" FontWeight="SemiBold" />
+                                <StackPanel Orientation="Horizontal" Spacing="18">
+                                    <CheckBox x:Name="HwSecureBootCheck" Content="UEFI Secure Boot" />
+                                    <CheckBox x:Name="HwTpm2Check" Content="TPM 2.0 Device (tpm-crb / tpm-tis)" />
+                                    <CheckBox x:Name="HwGuestAgentCheck" Content="QEMU Guest Agent Channel" />
+                                    <CheckBox x:Name="HwSerialConsoleCheck" Content="Serial Console Socket" />
+                                    <CheckBox x:Name="HwGdbStubCheck" Content="GDB Debug Server (127.0.0.1:1234)" />
+                                    <CheckBox x:Name="HwPauseAtStartCheck" Content="Pause CPU at Startup (-S)" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Port Forwarding UI (§27) -->
+                        <Border Padding="14" CornerRadius="8" Background="{ThemeResource LayerFillColorAltBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                            <StackPanel Spacing="10">
+                                <TextBlock Text="User-Mode NAT Port Forwarding (Localhost 127.0.0.1 → Guest)" FontWeight="SemiBold" />
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="160" />
+                                        <ColumnDefinition Width="110" />
+                                        <ColumnDefinition Width="130" />
+                                        <ColumnDefinition Width="130" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox x:Name="PfRuleNameBox" PlaceholderText="Rule Name (e.g. SSH)" Margin="0,0,6,0" />
+                                    <ComboBox x:Name="PfProtocolCombo" Grid.Column="1" SelectedIndex="0" HorizontalAlignment="Stretch" Margin="0,0,6,0">
+                                        <ComboBoxItem Content="TCP" />
+                                        <ComboBoxItem Content="UDP" />
+                                    </ComboBox>
+                                    <TextBox x:Name="PfHostPortBox" Grid.Column="2" PlaceholderText="Host Port (2222)" Text="2222" Margin="0,0,6,0" />
+                                    <TextBox x:Name="PfGuestPortBox" Grid.Column="3" PlaceholderText="Guest Port (22)" Text="22" Margin="0,0,6,0" />
+                                    <Button Grid.Column="4" Content="＋ Add Port Forward" Click="OnAddPortForwardClick" AutomationProperties.Name="Add Port Forward Rule" />
+                                </Grid>
+                                <TextBlock x:Name="PortForwardSummaryText" FontFamily="Consolas" FontSize="12" Text="No port forwarding rules configured." />
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Raw QEMU Escape Hatch & Generated Command Preview (§18) -->
+                        <Border Padding="14" CornerRadius="8" Background="{ThemeResource LayerFillColorAltBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                            <StackPanel Spacing="8">
+                                <TextBlock Text="Additional Raw QEMU Arguments (Advanced Escape Hatch — §18)" FontWeight="SemiBold" />
+                                <TextBox x:Name="HwRawArgsBox" PlaceholderText="Optional extra flags separated by spaces, e.g. -no-hpet" FontFamily="Consolas" />
+                                <Grid Margin="0,6,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="Diagnostics → Generated QEMU Command Line" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                    <Button Grid.Column="1" Content="📋 Copy Command" Click="OnCopyGeneratedCommandClick" AutomationProperties.Name="Copy Generated QEMU Command" />
+                                </Grid>
+                                <Border Background="#05070A" BorderBrush="#21262D" BorderThickness="1" CornerRadius="6" Padding="10">
+                                    <TextBlock x:Name="GeneratedCommandPreviewText"
+                                               FontFamily="Consolas"
+                                               FontSize="11.5"
+                                               Foreground="#79C0FF"
+                                               TextWrapping="Wrap"
+                                               IsTextSelectionEnabled="True" />
+                                </Border>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </Border>
+            </ScrollViewer>
+
+            <!-- ==================== VIEW 5: SNAPSHOTS & CLONING (§44, §45) ==================== -->
+            <ScrollViewer x:Name="SnapshotsViewPanel" Visibility="Collapsed">
+                <Border MaxWidth="920" HorizontalAlignment="Stretch" Padding="24" CornerRadius="10" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <StackPanel Spacing="18">
+                        <TextBlock x:Name="SnapshotsHeaderText" Text="Snapshots &amp; Virtual Machine Cloning" FontSize="22" FontWeight="SemiBold" />
+
+                        <!-- Create Snapshot Box -->
+                        <Border Padding="16" CornerRadius="8" Background="{ThemeResource LayerFillColorAltBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                            <StackPanel Spacing="10">
+                                <TextBlock Text="Create New Snapshot (QCOW2 Offline or Live QMP savevm)" FontWeight="SemiBold" />
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="240" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox x:Name="NewSnapshotNameBox" PlaceholderText="Snapshot name (e.g. Clean Install)" Text="Clean Install" Margin="0,0,8,0" AutomationProperties.AutomationId="NewSnapshotNameBox" />
+                                    <TextBox x:Name="NewSnapshotDescBox" Grid.Column="1" PlaceholderText="Optional description (e.g. Before system updates)" Margin="0,0,8,0" />
+                                    <Button Grid.Column="2" Content="＋ Take Snapshot" Click="OnTakeSnapshotClick" Style="{StaticResource AccentButtonStyle}" AutomationProperties.AutomationId="TakeSnapshotBtn" />
+                                </Grid>
+                                <Border Background="#05070A" BorderBrush="#21262D" BorderThickness="1" CornerRadius="6" Padding="12" Margin="0,6,0,0">
+                                    <TextBlock x:Name="SnapshotTreeText"
+                                               FontFamily="Consolas"
+                                               FontSize="12"
+                                               Foreground="#58A6FF"
+                                               TextWrapping="Wrap"
+                                               Text="● Current State" />
+                                </Border>
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <Button Content="⏪ Restore Latest Snapshot" Click="OnRestoreLatestSnapshotClick" AutomationProperties.AutomationId="RestoreLatestSnapshotBtn" />
+                                    <Button Content="🗑 Delete Latest Snapshot" Click="OnDeleteLatestSnapshotClick" AutomationProperties.AutomationId="DeleteLatestSnapshotBtn" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Clone VM Box (§45) -->
+                        <Border Padding="16" CornerRadius="8" Background="{ThemeResource LayerFillColorAltBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                            <StackPanel Spacing="10">
+                                <TextBlock Text="Clone Virtual Machine (Full Independent Clone or Fast Backing-File Linked Clone)" FontWeight="SemiBold" />
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="220" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox x:Name="CloneVmNameBox" PlaceholderText="New clone VM name..." Text="Cloned VM" Margin="0,0,8,0" AutomationProperties.AutomationId="CloneVmNameBox" />
+                                    <ComboBox x:Name="CloneTypeCombo" Grid.Column="1" SelectedIndex="0" HorizontalAlignment="Stretch" Margin="0,0,8,0">
+                                        <ComboBoxItem Content="Full Clone (Independent)" />
+                                        <ComboBoxItem Content="Linked Clone (Overlay)" />
+                                    </ComboBox>
+                                    <Button Grid.Column="2" Content="📑 Clone VM" Click="OnExecuteCloneVmClick" Style="{StaticResource AccentButtonStyle}" AutomationProperties.AutomationId="ExecuteCloneVmBtn" />
+                                </Grid>
+                                <TextBlock x:Name="CloneDependencyGraphText" FontFamily="Consolas" FontSize="11.5" Opacity="0.82" TextWrapping="Wrap" Text="Disk Dependency Graph: No active linked-clone dependencies." />
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </Border>
+            </ScrollViewer>
+
+            <!-- ==================== VIEW 6: MULTI-ARCH LAB & OS DOWNLOADS (§38) ==================== -->
+            <ScrollViewer x:Name="DownloadsViewPanel" Visibility="Collapsed">
+                <Border MaxWidth="960" HorizontalAlignment="Stretch" Padding="24" CornerRadius="10" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <StackPanel Spacing="16">
+                        <TextBlock Text="Multi-Architecture Virtualization Lab &amp; Official OS Downloads" FontSize="22" FontWeight="SemiBold" />
+                        <TextBlock Text="Provision ready-to-boot virtual machines across Linux, FreeBSD, Windows, and macOS spanning x86_64, i386, ARM64 (aarch64), RISC-V 64 (riscv64), and PowerPC 64 (ppc64), or download official open-source distribution ISOs." Opacity="0.78" TextWrapping="Wrap" />
+
+                        <Border Padding="16" CornerRadius="8" Background="{ThemeResource LayerFillColorAltBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                            <StackPanel Spacing="10">
+                                <TextBlock Text="1-Click Multi-Architecture Bootable VM Suite" FontWeight="SemiBold" FontSize="15" />
+                                <TextBlock Text="Creates and configures 9 self-contained bootable VMs (Ubuntu x86_64, Alpine ARM64, Debian RISC-V 64, Linux i386, FreeBSD x86_64, FreeBSD ARM64, Windows 11 x86_64, macOS Darwin x86_64, and Mac OS PowerPC64 mac99)." FontSize="12" Opacity="0.8" TextWrapping="Wrap" />
+                                <StackPanel Orientation="Horizontal" Spacing="10">
+                                    <Button Content="⚡ Provision All 9 Multi-Architecture VMs" Click="OnProvisionShowcaseClick" Style="{StaticResource AccentButtonStyle}" />
+                                    <Button Content="🚀 Boot &amp; Screenshot All Multi-Arch VMs" Click="OnBootAndScreenshotAllShowcaseVmsClick" AutomationProperties.AutomationId="BootAllShowcaseBtn" />
+                                </StackPanel>
+                                <TextBlock x:Name="ShowcaseProgressText" FontFamily="Consolas" FontSize="12" Foreground="#58A6FF" Text="" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border Padding="16" CornerRadius="8" Background="{ThemeResource LayerFillColorAltBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                            <StackPanel Spacing="10">
+                                <TextBlock Text="Official Operating System ISO Catalog (§38)" FontWeight="SemiBold" FontSize="15" />
+                                <TextBlock x:Name="OsDownloadCatalogText" FontFamily="Consolas" FontSize="12" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </Border>
+            </ScrollViewer>
+
+            <!-- ==================== VIEW 7: SETTINGS & DIAGNOSTICS (§48, §49, §50, §93) ==================== -->
+            <ScrollViewer x:Name="SettingsViewPanel" Visibility="Collapsed">
+                <Border MaxWidth="960" HorizontalAlignment="Stretch" Padding="24" CornerRadius="10" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <StackPanel Spacing="16">
+                        <TextBlock Text="Settings, Runtime Management &amp; Diagnostics" FontSize="22" FontWeight="SemiBold" />
+
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+
+                            <!-- Appearance & Storage -->
+                            <Border Margin="0,0,8,0" Padding="16" CornerRadius="8" Background="{ThemeResource LayerFillColorAltBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                                <StackPanel Spacing="10">
+                                    <TextBlock Text="Appearance &amp; VM Storage (§48)" FontWeight="SemiBold" />
+                                    <ComboBox x:Name="ThemeSelectorCombo" Header="Application Theme" SelectedIndex="0" SelectionChanged="OnThemeSelectorChanged" HorizontalAlignment="Stretch" AutomationProperties.AutomationId="ThemeSelectorCombo">
+                                        <ComboBoxItem Content="System Default" />
+                                        <ComboBoxItem Content="Light Mode" />
+                                        <ComboBoxItem Content="Dark Mode" />
+                                    </ComboBox>
+                                    <TextBox x:Name="SettingsStorageDirBox" Header="Default VM Storage Location" />
+                                    <ComboBox x:Name="ClosePolicyCombo" Header="When Closing App While VMs Are Running (§42)" SelectedIndex="0" HorizontalAlignment="Stretch">
+                                        <ComboBoxItem Content="Ask every time" />
+                                        <ComboBoxItem Content="Keep VMs running in background" />
+                                        <ComboBoxItem Content="Shut VMs down gracefully" />
+                                        <ComboBoxItem Content="Force stop all VMs" />
+                                    </ComboBox>
+                                    <Button Content="Save Preferences" Click="OnSaveSettingsClick" Style="{StaticResource AccentButtonStyle}" />
+                                </StackPanel>
+                            </Border>
+
+                            <!-- QEMU Runtime & WHPX Status -->
+                            <Border Grid.Column="1" Margin="8,0,0,0" Padding="16" CornerRadius="8" Background="{ThemeResource LayerFillColorAltBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                                <StackPanel Spacing="10">
+                                    <TextBlock Text="Virtualization Engine &amp; WHPX Acceleration (§6–§8)" FontWeight="SemiBold" />
+                                    <TextBlock x:Name="SettingsRuntimeSummaryText" FontSize="12" TextWrapping="Wrap" />
+                                    <TextBlock x:Name="SettingsWhpxSummaryText" FontSize="12" TextWrapping="Wrap" Foreground="#58A6FF" />
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <Button Content="🔄 Re-Probe QEMU &amp; WHPX" Click="OnReprobeRuntimeClick" />
+                                        <Button Content="🛡 Enable WHPX (Elevated DISM)" Click="OnEnableWhpxClick" />
+                                    </StackPanel>
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+
+                        <!-- Diagnostics & Readiness Score (§49, §93) -->
+                        <Border Padding="16" CornerRadius="8" Background="{ThemeResource LayerFillColorAltBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                            <StackPanel Spacing="10">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="Help → Diagnostics &amp; Readiness Audit (Sanitized)" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                    <Button Grid.Column="1" Content="📋 Copy Sanitized Diagnostics" Click="OnCopyDiagnosticsClick" AutomationProperties.AutomationId="CopyDiagnosticsBtn" />
+                                </Grid>
+                                <Border Background="#05070A" BorderBrush="#21262D" BorderThickness="1" CornerRadius="6" Padding="12">
+                                    <TextBlock x:Name="DiagnosticsReportText"
+                                               FontFamily="Consolas"
+                                               FontSize="11.5"
+                                               Foreground="#E6EDF3"
+                                               TextWrapping="Wrap"
+                                               IsTextSelectionEnabled="True" />
+                                </Border>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </Border>
+            </ScrollViewer>
+        </Grid>
+
+        <!-- Row 3: Global Status Bar -->
+        <Border Grid.Row="3" Padding="16,0" Background="{ThemeResource LayerFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,1,0,0">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock x:Name="GlobalStatusText" Text="Ready." VerticalAlignment="Center" FontSize="12" Opacity="0.82" />
+                <TextBlock Grid.Column="1" x:Name="GlobalCountText" Text="0 Virtual Machines" VerticalAlignment="Center" FontSize="12" Opacity="0.72" />
+            </Grid>
+        </Border>
+    </Grid>
+</Window>
