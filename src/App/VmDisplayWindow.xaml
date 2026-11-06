@@ -1,0 +1,72 @@
+<Window
+    x:Class="WinQemu.App.VmDisplayWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="Virtual Machine Display">
+
+    <Grid x:Name="RootGrid" Background="#0D1117" KeyDown="OnRootKeyDown" KeyUp="OnRootKeyUp" LostFocus="OnRootLostFocus" IsTabStop="True">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- Custom Title / Toolbar Header -->
+        <Border Grid.Row="0" Background="#161B22" BorderBrush="#30363D" BorderThickness="0,0,0,1" Padding="14,8">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                    <FontIcon Glyph="&#xE7F4;" Foreground="#4F8DFA" FontSize="18" />
+                    <TextBlock x:Name="TitleText" Text="Virtual Machine" FontWeight="SemiBold" FontSize="14" Foreground="#F0F6FC" VerticalAlignment="Center" />
+                    <Border Background="#1F6FEB" CornerRadius="4" Padding="6,2" VerticalAlignment="Center">
+                        <TextBlock x:Name="AccelBadgeText" Text="WHPX" FontSize="11" FontWeight="SemiBold" Foreground="White" />
+                    </Border>
+                </StackPanel>
+
+                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6">
+                    <Button x:Name="PauseResumeBtn" Content="⏸ Pause" Click="OnPauseResumeClick" AutomationProperties.Name="Pause or Resume Guest" />
+                    <Button Content="↻ Restart" Click="OnRestartClick" AutomationProperties.Name="Restart Guest" />
+                    <Button Content="Ctrl+Alt+Del" Click="OnCtrlAltDelClick" AutomationProperties.Name="Send Ctrl+Alt+Del" />
+                    <Button Content="📷 Screenshot" Click="OnScreenshotClick" AutomationProperties.Name="Capture Guest Screenshot" />
+                    <Button x:Name="FullscreenBtn" Content="⛶ Fullscreen" Click="OnFullscreenClick" AutomationProperties.Name="Toggle Fullscreen" />
+                    <Button Content="⏻ Shut Down" Click="OnShutDownClick" AutomationProperties.Name="Graceful Shut Down" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- Guest Framebuffer Viewport -->
+        <Border Grid.Row="1" Background="#05070A" Margin="8" CornerRadius="8" BorderBrush="#21262D" BorderThickness="1">
+            <Grid>
+                <Image x:Name="FramebufferImage"
+                       Stretch="Uniform"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center"
+                       PointerPressed="OnViewportPointerPressed"
+                       PointerMoved="OnViewportPointerMoved"
+                       PointerReleased="OnViewportPointerReleased" />
+                <TextBlock x:Name="OverlayStatusText"
+                           Text="Connecting to guest display..."
+                           Foreground="#8B949E"
+                           FontSize="14"
+                           HorizontalAlignment="Center"
+                           VerticalAlignment="Center" />
+            </Grid>
+        </Border>
+
+        <!-- Bottom Status Bar -->
+        <Border Grid.Row="2" Background="#161B22" BorderBrush="#30363D" BorderThickness="0,1,0,0" Padding="14,6">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock x:Name="StatusFooterText" Text="Display active · Host key: Ctrl+Alt" Foreground="#8B949E" FontSize="12" />
+                <TextBlock Grid.Column="1" x:Name="MetricsFooterText" Text="1280×800 · 60 FPS" Foreground="#8B949E" FontSize="12" />
+            </Grid>
+        </Border>
+    </Grid>
+</Window>

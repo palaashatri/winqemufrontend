@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>WinQemu.Native.GuestDisplay</RootNamespace>
+    <AssemblyName>WinQemu.Native.GuestDisplay</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\Core\WinQemu.Core.csproj" />
+    <ProjectReference Include="..\..\Display\WinQemu.Display.csproj" />
+  </ItemGroup>
+</Project>

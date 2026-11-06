@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <RootNamespace>WinQemu.App</RootNamespace>
+    <AssemblyName>WinQemu.App</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Platforms>x64;ARM64</Platforms>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-x64</RuntimeIdentifier>
+    <UseWinUI>true</UseWinUI>
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <ApplicationIcon>..\..\assets\brand\icon.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.6.250205002" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.1742" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="..\..\assets\brand\icon.ico" Link="Assets\icon.ico" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\assets\brand\icon-256.png" Link="Assets\icon-256.png" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\assets\brand\icon-64.png" Link="Assets\icon-64.png" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\assets\brand\icon-32.png" Link="Assets\icon-32.png" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\assets\brand\wordmark.png" Link="Assets\wordmark.png" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Core\WinQemu.Core.csproj" />
+    <ProjectReference Include="..\Qemu\WinQemu.Qemu.csproj" />
+    <ProjectReference Include="..\Storage\WinQemu.Storage.csproj" />
+    <ProjectReference Include="..\Networking\WinQemu.Networking.csproj" />
+    <ProjectReference Include="..\Firmware\WinQemu.Firmware.csproj" />
+    <ProjectReference Include="..\Security\WinQemu.Security.csproj" />
+    <ProjectReference Include="..\Integration\WinQemu.Integration.csproj" />
+    <ProjectReference Include="..\Display\WinQemu.Display.csproj" />
+    <ProjectReference Include="..\Native\GuestDisplay\WinQemu.Native.GuestDisplay.csproj" />
+  </ItemGroup>
+</Project>
