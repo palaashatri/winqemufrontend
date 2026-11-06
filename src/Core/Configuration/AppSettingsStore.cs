@@ -37,7 +37,15 @@ public sealed class AppSettingsStore
         }
         catch (JsonException)
         {
-            File.Move(_settingsFilePath, $"{_settingsFilePath}.corrupt", overwrite: true);
+            try
+            {
+                File.Move(_settingsFilePath, $"{_settingsFilePath}.corrupt", overwrite: true);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Best-effort backup; still return default settings.
+            }
+
             var fallback = new AppSettings();
             EnsureDirectoriesExist(fallback);
             return fallback;

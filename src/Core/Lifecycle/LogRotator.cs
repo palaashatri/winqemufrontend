@@ -147,10 +147,10 @@ public sealed partial class LogRotator : IDisposable
         }
     }
 
-    [GeneratedRegex(@"(?i)(password|passwd|secret|passphrase|credential)[""']?\s*[:=]\s*[""']?[^\s""']+")]
+    [GeneratedRegex(@"(?i)(password|passwd|secret|passphrase|credential)[""']?\s*[:=]\s*(""[^""]*""|'[^']*'|[^\s""']+)")]
     private static partial Regex PasswordRegex();
 
-    [GeneratedRegex(@"(?i)(token|apikey|api_key|authorization|bearer)[""']?\s*[:=]\s*[""']?[^\s""']+")]
+    [GeneratedRegex(@"(?i)(token|apikey|api_key|authorization|bearer)[""']?\s*[:=]\s*(""[^""]*""|'[^']*'|[^\s""']+)")]
     private static partial Regex TokenRegex();
 
     [GeneratedRegex(@"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=\-]{8,}")]

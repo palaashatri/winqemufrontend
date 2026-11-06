@@ -169,6 +169,7 @@ public sealed class MainViewModel : IAsyncDisposable
     private readonly SnapshotManager _snapshotManager = new();
     private readonly CloneManager _cloneManager;
     private readonly Dictionary<VmArchitecture, QemuTargetCapabilities> _capabilitiesByArch = [];
+    private readonly Dictionary<string, EventHandler<VmStateTransitionEvent>> _sessionStateHandlers = new(StringComparer.Ordinal);
 
     public MainViewModel()
     {
@@ -725,6 +726,13 @@ public sealed class MainViewModel : IAsyncDisposable
         }
         catch when (spec.ActiveAccelerator == "whpx")
         {
+            // Ensure the first swtpm instance has exited and released its TPM state directory before starting fallback.
+            if (swtpm is not null)
+            {
+                try { await swtpm.DisposeAsync(); } catch { }
+                swtpm = null;
+            }
+
             // Automatic resilient fallback to TCG if WHPX partition setup fails on a specific guest config,
             // without mutating the user's saved card.Vm.Accelerator preference.
             SwtpmManager? fallbackSwtpm = null;
@@ -783,6 +791,10 @@ public sealed class MainViewModel : IAsyncDisposable
         }
         catch
         {
+            if (swtpm is not null)
+            {
+                try { await swtpm.DisposeAsync(); } catch { }
+            }
             card.State = VmState.Crashed;
             throw;
         }
@@ -790,23 +802,36 @@ public sealed class MainViewModel : IAsyncDisposable
 
     private void SubscribeSessionStateChanges(VmCardItem card, ManagedVmSession session)
     {
-        session.StateMachine.StateChanged += (_, e) =>
+        var vmId = session.Vm.Identity.Id;
+        if (_sessionStateHandlers.Remove(vmId, out var existingHandler))
         {
+            session.StateMachine.StateChanged -= existingHandler;
+        }
+
+        EventHandler<VmStateTransitionEvent>? handler = null;
+        handler = (_, e) =>
+        {
+            var currentCard = AllVms.FirstOrDefault(c => string.Equals(c.Id, vmId, StringComparison.Ordinal)) ?? card;
             var dq = App.CurrentMainWindow?.DispatcherQueue;
             if (dq is not null)
             {
-                dq.TryEnqueue(() => card.State = e.CurrentState);
+                dq.TryEnqueue(() => currentCard.State = e.CurrentState);
             }
             else
             {
-                card.State = e.CurrentState;
+                currentCard.State = e.CurrentState;
             }
 
             if (e.CurrentState is VmState.Stopped or VmState.Crashed)
             {
-                _ = CleanupSeedMediaAfterInstallAsync(card.Vm);
+                session.StateMachine.StateChanged -= handler;
+                _sessionStateHandlers.Remove(vmId);
+                _ = CleanupSeedMediaAfterInstallAsync(currentCard.Vm);
             }
         };
+
+        _sessionStateHandlers[vmId] = handler;
+        session.StateMachine.StateChanged += handler;
     }
 
     private async Task CleanupSeedMediaAfterInstallAsync(VirtualMachine vm)

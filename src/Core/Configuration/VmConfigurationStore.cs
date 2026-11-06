@@ -425,45 +425,44 @@ public sealed class VmConfigurationStore
         string extractDir,
         bool allowExternalHostPathsAndRawArgs)
     {
-        if (allowExternalHostPathsAndRawArgs)
+        if (!allowExternalHostPathsAndRawArgs)
         {
-            return;
-        }
-
-        foreach (var disk in vm.Storage)
-        {
-            if (!string.IsNullOrWhiteSpace(disk.Path) && !IsUnderDirectory(extractDir, disk.Path))
+            foreach (var disk in vm.Storage)
             {
-                throw new SecurityException($"Imported VM configuration references an external disk path '{disk.Path}' without explicit user approval (§58).");
+                if (!string.IsNullOrWhiteSpace(disk.Path) && !IsUnderDirectory(extractDir, disk.Path))
+                {
+                    throw new SecurityException($"Imported VM configuration references an external disk path '{disk.Path}' without explicit user approval (§58).");
+                }
+
+                if (!string.IsNullOrWhiteSpace(disk.ParentBackingFilePath) && !IsUnderDirectory(extractDir, disk.ParentBackingFilePath))
+                {
+                    throw new SecurityException($"Imported VM configuration references an external backing disk path '{disk.ParentBackingFilePath}' without explicit user approval (§58).");
+                }
             }
 
-            if (!string.IsNullOrWhiteSpace(disk.ParentBackingFilePath) && !IsUnderDirectory(extractDir, disk.ParentBackingFilePath))
+            string?[] sensitivePaths =
+            [
+                vm.Firmware.VarsFilePath,
+                vm.Firmware.CustomCodePath,
+                vm.Firmware.CustomVarsTemplatePath,
+                vm.Boot.DirectKernelPath,
+                vm.Boot.InitrdPath,
+                vm.Integration.UnattendedInstall.GeneratedSeedMediaPath
+            ];
+
+            foreach (var p in sensitivePaths)
             {
-                throw new SecurityException($"Imported VM configuration references an external backing disk path '{disk.ParentBackingFilePath}' without explicit user approval (§58).");
+                if (!string.IsNullOrWhiteSpace(p) && !IsUnderDirectory(extractDir, p))
+                {
+                    throw new SecurityException($"Imported VM configuration references an external host path '{p}' without explicit user approval (§58).");
+                }
             }
-        }
 
-        string?[] sensitivePaths =
-        [
-            vm.Firmware.VarsFilePath,
-            vm.Firmware.CustomCodePath,
-            vm.Firmware.CustomVarsTemplatePath,
-            vm.Boot.DirectKernelPath,
-            vm.Boot.InitrdPath,
-            vm.Integration.UnattendedInstall.GeneratedSeedMediaPath
-        ];
-
-        foreach (var p in sensitivePaths)
-        {
-            if (!string.IsNullOrWhiteSpace(p) && !IsUnderDirectory(extractDir, p))
+            if (vm.AdvancedQemuArgs.Count > 0)
             {
-                throw new SecurityException($"Imported VM configuration references an external host path '{p}' without explicit user approval (§58).");
+                throw new SecurityException(
+                    $"Imported VM configuration contains raw QEMU arguments ({string.Join(" ", vm.AdvancedQemuArgs)}) which require explicit user approval before import (§58).");
             }
-        }
-
-        if (vm.AdvancedQemuArgs.Count > 0)
-        {
-            throw new SecurityException("Imported VM configuration contains raw QEMU arguments which require explicit user approval before import (§58).");
         }
 
         // Strip any residual host-specific optional references outside the package directory

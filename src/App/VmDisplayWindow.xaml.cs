@@ -93,7 +93,7 @@ public sealed partial class VmDisplayWindow : Window
                 stream.Write(e.BgraPixels, 0, Math.Min(e.BgraPixels.Length, e.Width * e.Height * 4));
                 _bitmap.Invalidate();
 
-                var metrics = _session.LastSampledMetrics ?? _session.SampleHostMetrics();
+                var metrics = _session.SampleHostMetrics();
                 MetricsFooterText.Text = $"{e.Width}×{e.Height} · Frame #{_vncClient.FramesReceived} · Host CPU {metrics.HostCpuUsagePercent:0.0}% · Working Set {metrics.HostWorkingSetBytes / (1024 * 1024)} MiB";
             }
             catch

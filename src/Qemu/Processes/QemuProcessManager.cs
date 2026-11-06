@@ -468,51 +468,43 @@ public sealed class QemuProcessManager : IAsyncDisposable
         }
 
         VmExclusiveLockHandle? lockHandle = null;
-        if (!string.IsNullOrWhiteSpace(vm.DirectoryPath))
+        LogRotator? logRotator = null;
+        Process? proc = null;
+
+        try
         {
-            try
+            if (!string.IsNullOrWhiteSpace(vm.DirectoryPath))
             {
                 lockHandle = await VmLockManager.AcquireExclusiveLockAsync(vm.DirectoryPath, cancellationToken).ConfigureAwait(false);
             }
-            catch
+
+            var logPath = !string.IsNullOrWhiteSpace(vm.DirectoryPath)
+                ? Path.Combine(VmDirectoryLayout.GetLogsDirectory(vm.DirectoryPath), "qemu-runtime.log")
+                : Path.Combine(Path.GetTempPath(), $"winqemu-{vm.Identity.Id}.log");
+
+            logRotator = new LogRotator(logPath);
+            logRotator.AppendLine("COMMAND", launchSpec.FormattedCommandLine);
+
+            var psi = new ProcessStartInfo
             {
-                if (companionResource is not null)
-                {
-                    await companionResource.DisposeAsync().ConfigureAwait(false);
-                }
-                throw;
+                FileName = launchSpec.ExecutablePath,
+                WorkingDirectory = launchSpec.WorkingDirectory,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            foreach (var arg in launchSpec.ArgumentList)
+            {
+                psi.ArgumentList.Add(arg);
             }
-        }
 
-        var logPath = !string.IsNullOrWhiteSpace(vm.DirectoryPath)
-            ? Path.Combine(VmDirectoryLayout.GetLogsDirectory(vm.DirectoryPath), "qemu-runtime.log")
-            : Path.Combine(Path.GetTempPath(), $"winqemu-{vm.Identity.Id}.log");
-
-        var logRotator = new LogRotator(logPath);
-        logRotator.AppendLine("COMMAND", launchSpec.FormattedCommandLine);
-
-        var psi = new ProcessStartInfo
-        {
-            FileName = launchSpec.ExecutablePath,
-            WorkingDirectory = launchSpec.WorkingDirectory,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-        foreach (var arg in launchSpec.ArgumentList)
-        {
-            psi.ArgumentList.Add(arg);
-        }
-
-        Process proc;
-        try
-        {
             proc = Process.Start(psi)
                 ?? throw new InvalidOperationException("Failed to start QEMU process.");
         }
         catch
         {
+            logRotator?.Dispose();
             if (lockHandle is not null)
             {
                 await lockHandle.DisposeAsync().ConfigureAwait(false);
@@ -521,7 +513,6 @@ public sealed class QemuProcessManager : IAsyncDisposable
             {
                 await companionResource.DisposeAsync().ConfigureAwait(false);
             }
-            logRotator.Dispose();
             throw;
         }
 
@@ -565,6 +556,7 @@ public sealed class QemuProcessManager : IAsyncDisposable
         }
         catch (Exception ex)
         {
+            _sessions.TryRemove(vm.Identity.Id, out _);
             try
             {
                 if (!proc.HasExited)
@@ -576,22 +568,9 @@ public sealed class QemuProcessManager : IAsyncDisposable
             {
             }
 
-            if (lockHandle is not null)
-            {
-                await lockHandle.DisposeAsync().ConfigureAwait(false);
-            }
-            else
-            {
-                VmLockManager.ReleaseLockFile(vm.DirectoryPath);
-            }
-
-            if (companionResource is not null)
-            {
-                try { await companionResource.DisposeAsync().ConfigureAwait(false); } catch { }
-            }
-
             var remediation = ErrorTranslator.Translate(ex.Message);
             session.StateMachine.TransitionTo(VmState.Crashed, "Failed during startup/QMP handshake", remediation.UserFriendlyExplanation);
+            try { await session.DisposeAsync().ConfigureAwait(false); } catch { }
             throw;
         }
     }
@@ -610,17 +589,23 @@ public sealed class QemuProcessManager : IAsyncDisposable
             return existing;
         }
 
+        Process? proc = null;
+        QmpClient? qmpClient = null;
+        LogRotator? logRotator = null;
+        ManagedVmSession? session = null;
+
         try
         {
-            var proc = Process.GetProcessById(lockRecord.ProcessId);
+            proc = Process.GetProcessById(lockRecord.ProcessId);
             if (proc.HasExited || !VmLockManager.IsMatchingQemuProcessAlive(lockRecord))
             {
                 proc.Dispose();
+                proc = null;
                 VmLockManager.ReleaseLockFile(vm.DirectoryPath);
                 return null;
             }
 
-            var qmpClient = new QmpClient();
+            qmpClient = new QmpClient();
             await qmpClient.ConnectTcpLoopbackAsync(
                 lockRecord.QmpPort,
                 TimeSpan.FromSeconds(3),
@@ -644,12 +629,10 @@ public sealed class QemuProcessManager : IAsyncDisposable
             var logPath = !string.IsNullOrWhiteSpace(vm.DirectoryPath)
                 ? Path.Combine(VmDirectoryLayout.GetLogsDirectory(vm.DirectoryPath), "qemu-runtime.log")
                 : Path.Combine(Path.GetTempPath(), $"winqemu-{vm.Identity.Id}.log");
-            var logRotator = new LogRotator(logPath);
+            logRotator = new LogRotator(logPath);
 
-            var session = new ManagedVmSession(vm, launchSpec, proc, qmpClient, logRotator);
-            proc.EnableRaisingEvents = true;
-            proc.Exited += (_, _) => session.ForceStopAsync().GetAwaiter().GetResult();
-            qmpClient.EventReceived += (_, e) => session.AppendLog("QMP-EVENT", e.EventName);
+            session = new ManagedVmSession(vm, launchSpec, proc, qmpClient, logRotator);
+            session.AttachProcessStreamsAndEvents();
 
             var status = await qmpClient.QueryStatusAsync(cancellationToken).ConfigureAwait(false);
             var mappedState = session.StateMachine.MapQmpRunState(status.Status);
@@ -662,6 +645,19 @@ public sealed class QemuProcessManager : IAsyncDisposable
         }
         catch
         {
+            if (session is not null)
+            {
+                try { await session.DisposeAsync().ConfigureAwait(false); } catch { }
+            }
+            else
+            {
+                if (qmpClient is not null)
+                {
+                    try { await qmpClient.DisposeAsync().ConfigureAwait(false); } catch { }
+                }
+                logRotator?.Dispose();
+                proc?.Dispose();
+            }
             return null;
         }
     }

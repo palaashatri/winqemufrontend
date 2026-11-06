@@ -314,9 +314,11 @@ public sealed class CoreAndQemuUnitTests
             SecurityValidator.ValidateSafeChildPath(@"C:\VMs\MyVm", @"..\..\Windows\System32\cmd.exe"));
 
         var redacted = LogRotator.RedactSecrets(
-            "Connecting with password=\"SuperSecret123!\" and \"token\": \"abc987xyz\" and Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig");
-        Assert.DoesNotContain("SuperSecret123!", redacted);
-        Assert.DoesNotContain("abc987xyz", redacted);
+            "Connecting with password=\"Super Secret 123!\" and \"token\": \"abc 987 xyz\" and Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig");
+        Assert.DoesNotContain("Super Secret 123!", redacted);
+        Assert.DoesNotContain("123!", redacted);
+        Assert.DoesNotContain("abc 987 xyz", redacted);
+        Assert.DoesNotContain("xyz", redacted);
         Assert.DoesNotContain("eyJhbGciOiJIUzI1NiJ9", redacted);
         Assert.Contains("[REDACTED]", redacted);
 

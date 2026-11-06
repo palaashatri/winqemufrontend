@@ -21,6 +21,8 @@ public sealed record OfficialOsDownloadEntry(
 /// </summary>
 public static class OsDownloadCatalog
 {
+    public const string CurrentDebianPointRelease = "13.7.0";
+
     private static readonly IReadOnlyList<OfficialOsDownloadEntry> Entries =
     [
         new(
@@ -91,11 +93,11 @@ public static class OsDownloadCatalog
         new(
             Id: "debian-netinst-amd64",
             Name: "Debian 13 Trixie Netinst (x86_64)",
-            Version: "13.7.0",
+            Version: CurrentDebianPointRelease,
             OsFamily: GuestOsFamily.Linux,
             Architecture: VmArchitecture.X86_64,
             PresetId: "debian",
-            OfficialSourceUrl: "https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/debian-13.7.0-amd64-netinst.iso",
+            OfficialSourceUrl: GetDebianCurrentNetinstIsoUrl(CurrentDebianPointRelease),
             PublisherName: "Debian Project",
             ApproximateSizeBytes: 661_651_456L,
             Sha256Checksum: null,
@@ -155,4 +157,10 @@ public static class OsDownloadCatalog
     ];
 
     public static IReadOnlyList<OfficialOsDownloadEntry> GetAll() => Entries;
+
+    public static string GetDebianCurrentNetinstIsoUrl(string pointReleaseVersion = CurrentDebianPointRelease)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(pointReleaseVersion);
+        return $"https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/debian-{pointReleaseVersion.Trim()}-amd64-netinst.iso";
+    }
 }

@@ -288,9 +288,7 @@ public sealed partial class MainWindow : Window
         }
         else if (file.Path.EndsWith(".qvm", StringComparison.OrdinalIgnoreCase))
         {
-            var imported = await _viewModel.VmStore.ImportPortablePackageAsync(file.Path, _viewModel.Settings.VmStorageDirectory);
-            await _viewModel.ReloadVmLibraryAsync();
-            GlobalStatusText.Text = $"Imported portable VM '{imported.Identity.Name}'.";
+            await ImportPortablePackageWithApprovalAsync(file.Path);
         }
     }
 
@@ -1227,15 +1225,25 @@ public sealed partial class MainWindow : Window
         GlobalStatusText.Text = $"Saved hardware configuration for '{card.Name}'.";
     }
 
-    private static string FormatCommandLineArguments(IReadOnlyList<string> args)
+    public static string FormatCommandLineArguments(IReadOnlyList<string> args)
     {
         return string.Join(" ", args.Select(a =>
-            a.Any(char.IsWhiteSpace) || a.Contains('"')
-                ? $"\"{a.Replace("\"", "\\\"")}\""
-                : a));
+        {
+            if (a.Length == 0 ||
+                a.Any(char.IsWhiteSpace) ||
+                a.Contains('"') ||
+                a.Contains('\'') ||
+                a.Contains('\\'))
+            {
+                var escaped = a.Replace("\\", "\\\\").Replace("\"", "\\\"");
+                return $"\"{escaped}\"";
+            }
+
+            return a;
+        }));
     }
 
-    private static List<string> ParseCommandLineArguments(string? input)
+    public static List<string> ParseCommandLineArguments(string? input)
     {
         var results = new List<string>();
         if (string.IsNullOrWhiteSpace(input))
@@ -1244,14 +1252,16 @@ public sealed partial class MainWindow : Window
         }
 
         var current = new StringBuilder();
+        var hasToken = false;
         var inQuotes = false;
         char quoteChar = '\0';
 
         for (var i = 0; i < input.Length; i++)
         {
             var c = input[i];
-            if (c == '\\' && i + 1 < input.Length && (input[i + 1] == '"' || input[i + 1] == '\''))
+            if (c == '\\' && i + 1 < input.Length && (input[i + 1] == '\\' || input[i + 1] == '"' || input[i + 1] == '\''))
             {
+                hasToken = true;
                 current.Append(input[++i]);
                 continue;
             }
@@ -1269,24 +1279,27 @@ public sealed partial class MainWindow : Window
             }
             else if (c is '"' or '\'')
             {
+                hasToken = true;
                 inQuotes = true;
                 quoteChar = c;
             }
             else if (char.IsWhiteSpace(c))
             {
-                if (current.Length > 0)
+                if (hasToken)
                 {
                     results.Add(current.ToString());
                     current.Clear();
+                    hasToken = false;
                 }
             }
             else
             {
+                hasToken = true;
                 current.Append(c);
             }
         }
 
-        if (current.Length > 0)
+        if (hasToken)
         {
             results.Add(current.ToString());
         }
@@ -1500,10 +1513,20 @@ public sealed partial class MainWindow : Window
             ? previousStorageDir
             : SettingsStorageDirBox.Text.Trim();
 
-        if (!string.Equals(
-                Path.GetFullPath(previousStorageDir),
-                Path.GetFullPath(newStorageDir),
-                StringComparison.OrdinalIgnoreCase))
+        string normalizedPrevious;
+        string normalizedNew;
+        try
+        {
+            normalizedPrevious = Path.GetFullPath(previousStorageDir);
+            normalizedNew = Path.GetFullPath(newStorageDir);
+        }
+        catch (Exception ex)
+        {
+            GlobalStatusText.Text = $"Invalid VM storage directory '{newStorageDir}': {ex.Message}";
+            return;
+        }
+
+        if (!string.Equals(normalizedPrevious, normalizedNew, StringComparison.OrdinalIgnoreCase))
         {
             if (_viewModel.ProcessManager.ActiveSessions.Any(s => s.StateMachine.IsActiveProcessState))
             {
@@ -1511,24 +1534,47 @@ public sealed partial class MainWindow : Window
                 return;
             }
 
-            Directory.CreateDirectory(newStorageDir);
+            try
+            {
+                Directory.CreateDirectory(normalizedNew);
+            }
+            catch (Exception ex)
+            {
+                GlobalStatusText.Text = $"Cannot create VM storage directory '{normalizedNew}': {ex.Message}";
+                return;
+            }
+
+            var movedVms = new List<VirtualMachine>();
             foreach (var card in _viewModel.AllVms.ToList())
             {
                 if (!string.IsNullOrWhiteSpace(card.Vm.DirectoryPath) && Directory.Exists(card.Vm.DirectoryPath))
                 {
                     try
                     {
-                        await _viewModel.VmStore.MoveVmDirectoryAsync(card.Vm, newStorageDir);
+                        await _viewModel.VmStore.MoveVmDirectoryAsync(card.Vm, normalizedNew);
+                        movedVms.Add(card.Vm);
                     }
                     catch (Exception ex)
                     {
-                        GlobalStatusText.Text = $"Failed to move '{card.Name}' to '{newStorageDir}': {ex.Message}";
+                        foreach (var moved in movedVms)
+                        {
+                            try
+                            {
+                                await _viewModel.VmStore.MoveVmDirectoryAsync(moved, normalizedPrevious);
+                            }
+                            catch
+                            {
+                            }
+                        }
+
+                        await _viewModel.ReloadVmLibraryAsync();
+                        GlobalStatusText.Text = $"Failed to move '{card.Name}' to '{normalizedNew}' (rolled back {movedVms.Count} moved VM(s)): {ex.Message}";
                         return;
                     }
                 }
             }
 
-            _viewModel.Settings.VmStorageDirectory = newStorageDir;
+            _viewModel.Settings.VmStorageDirectory = normalizedNew;
             await _viewModel.ReloadVmLibraryAsync();
         }
 
@@ -1610,9 +1656,7 @@ public sealed partial class MainWindow : Window
 
         if (file.Path.EndsWith(".qvm", StringComparison.OrdinalIgnoreCase))
         {
-            var vm = await _viewModel.VmStore.ImportPortablePackageAsync(file.Path, _viewModel.Settings.VmStorageDirectory);
-            await _viewModel.ReloadVmLibraryAsync();
-            GlobalStatusText.Text = $"Imported portable VM '{vm.Identity.Name}'.";
+            await ImportPortablePackageWithApprovalAsync(file.Path);
         }
         else
         {
@@ -1657,6 +1701,66 @@ public sealed partial class MainWindow : Window
             }
             card.RefreshStaticSummaries();
             GlobalStatusText.Text = $"Imported disk image '{file.Name}' into new VM '{card.Name}'.";
+        }
+    }
+
+    private async Task<VirtualMachine?> ImportPortablePackageWithApprovalAsync(string qvmPath)
+    {
+        try
+        {
+            var vm = await _viewModel.VmStore.ImportPortablePackageAsync(
+                qvmPath,
+                _viewModel.Settings.VmStorageDirectory,
+                allowExternalHostPathsAndRawArgs: false);
+            await _viewModel.ReloadVmLibraryAsync();
+            GlobalStatusText.Text = $"Imported portable VM '{vm.Identity.Name}'.";
+            return vm;
+        }
+        catch (System.Security.SecurityException secEx)
+        {
+            if (Content?.XamlRoot is null)
+            {
+                GlobalStatusText.Text = $"Import blocked: {secEx.Message}";
+                return null;
+            }
+
+            var dialog = new ContentDialog
+            {
+                XamlRoot = Content.XamlRoot,
+                Title = "Approve Imported VM Configuration (§58)",
+                Content = $"{secEx.Message}\n\nDo you want to approve these raw QEMU arguments / external paths and continue importing?",
+                PrimaryButtonText = "Approve & Import",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Close
+            };
+
+            var decision = await dialog.ShowAsync();
+            if (decision != ContentDialogResult.Primary)
+            {
+                GlobalStatusText.Text = "Portable VM import cancelled by user.";
+                return null;
+            }
+
+            try
+            {
+                var approvedVm = await _viewModel.VmStore.ImportPortablePackageAsync(
+                    qvmPath,
+                    _viewModel.Settings.VmStorageDirectory,
+                    allowExternalHostPathsAndRawArgs: true);
+                await _viewModel.ReloadVmLibraryAsync();
+                GlobalStatusText.Text = $"Imported portable VM '{approvedVm.Identity.Name}' with user approval.";
+                return approvedVm;
+            }
+            catch (Exception ex)
+            {
+                GlobalStatusText.Text = $"Import failed: {ex.Message}";
+                return null;
+            }
+        }
+        catch (Exception ex)
+        {
+            GlobalStatusText.Text = $"Import failed: {ex.Message}";
+            return null;
         }
     }
 

@@ -18,19 +18,53 @@ namespace WinQemu.Tests.QemuIntegration;
 
 public sealed class RequiresQemuFactAttribute : FactAttribute
 {
-    public RequiresQemuFactAttribute()
+    public RequiresQemuFactAttribute(
+        bool requireX86_64 = true,
+        bool requireQemuImg = false,
+        bool requireAnyMultiArchTarget = false)
     {
         var runtime = QemuRuntimeLocator.Discover();
-        if (!runtime.IsAvailable || runtime.QemuSystemX86_64Path is null || runtime.QemuImgPath is null)
+        if (!runtime.IsAvailable)
         {
-            Skip = "QEMU runtime binaries are not installed on this machine.";
+            Skip = "QEMU runtime is not installed on this machine.";
+            return;
+        }
+
+        if (requireX86_64 && string.IsNullOrWhiteSpace(runtime.QemuSystemX86_64Path))
+        {
+            Skip = "qemu-system-x86_64 binary is not installed on this machine.";
+            return;
+        }
+
+        if (requireQemuImg && string.IsNullOrWhiteSpace(runtime.QemuImgPath))
+        {
+            Skip = "qemu-img binary is not installed on this machine.";
+            return;
+        }
+
+        if (requireAnyMultiArchTarget)
+        {
+            var multiArchTargets = new[]
+            {
+                VmArchitecture.I386,
+                VmArchitecture.Aarch64,
+                VmArchitecture.Riscv64,
+                VmArchitecture.Ppc64
+            };
+            if (!multiArchTargets.Any(a =>
+                    runtime.TargetBinaries.TryGetValue(a, out var path) &&
+                    !string.IsNullOrWhiteSpace(path) &&
+                    File.Exists(path)))
+            {
+                Skip = "None of the non-x86_64 multi-architecture QEMU target binaries are installed on this machine.";
+            }
         }
     }
 }
 
 public sealed class RealQemuIntegrationTests
 {
-    [RequiresQemuFact]
+    [RequiresQemuFact(requireX86_64: true, requireQemuImg: true)]
     public async Task RealQemu_TcgLifecycle_DiskSnapshotCloneAndVncFramebufferTest()
     {
         var runtime = QemuRuntimeLocator.Discover();
@@ -136,7 +170,7 @@ public sealed class RealQemuIntegrationTests
         }
     }
 
-    [RequiresQemuFact]
+    [RequiresQemuFact(requireX86_64: true, requireQemuImg: false)]
     public async Task RealQemu_WhpxProbeAndHardwareAcceleratedSmokeTest()
     {
         var runtime = QemuRuntimeLocator.Discover();
@@ -184,7 +218,7 @@ public sealed class RealQemuIntegrationTests
         }
     }
 
-    [RequiresQemuFact]
+    [RequiresQemuFact(requireX86_64: false, requireQemuImg: false, requireAnyMultiArchTarget: true)]
     public async Task RealQemu_MultiArchitectureBoot_I386_Aarch64_Riscv64_Ppc64Test()
     {
         var runtime = QemuRuntimeLocator.Discover();

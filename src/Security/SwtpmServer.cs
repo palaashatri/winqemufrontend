@@ -84,7 +84,7 @@ public sealed class SwtpmManager : IAsyncDisposable
         return _externalSwtpmProcess is { HasExited: false } ? preferredPort : null;
     }
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         if (_externalSwtpmProcess is not null)
         {
@@ -93,6 +93,8 @@ public sealed class SwtpmManager : IAsyncDisposable
                 if (!_externalSwtpmProcess.HasExited)
                 {
                     _externalSwtpmProcess.Kill(entireProcessTree: true);
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                    await _externalSwtpmProcess.WaitForExitAsync(cts.Token).ConfigureAwait(false);
                 }
             }
             catch
@@ -102,7 +104,10 @@ public sealed class SwtpmManager : IAsyncDisposable
             _externalSwtpmProcess = null;
         }
 
-        return ValueTask.CompletedTask;
+        if (File.Exists(ControlSocketPath))
+        {
+            try { File.Delete(ControlSocketPath); } catch { }
+        }
     }
 }
 
