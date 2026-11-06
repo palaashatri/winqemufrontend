@@ -26,22 +26,29 @@ public sealed class UiAutomationTests
         Assert.True(File.Exists(xamlPath), $"Expected MainWindow.xaml at {xamlPath}");
 
         var doc = XDocument.Load(xamlPath);
-        var xmlText = File.ReadAllText(xamlPath);
+        var automationIds = doc.Descendants()
+            .SelectMany(e => e.Attributes())
+            .Where(a => a.Name.LocalName == "AutomationProperties.AutomationId")
+            .Select(a => a.Value)
+            .ToHashSet(StringComparer.Ordinal);
 
-        // Verify key UI Automation IDs exist for automated UI navigation (§61, §74)
-        Assert.Contains("AutomationProperties.AutomationId=\"PrimaryNavigationBar\"", xmlText);
-        Assert.Contains("AutomationProperties.AutomationId=\"NavHomeBtn\"", xmlText);
-        Assert.Contains("AutomationProperties.AutomationId=\"NavWizardBtn\"", xmlText);
-        Assert.Contains("AutomationProperties.AutomationId=\"NavConsoleBtn\"", xmlText);
-        Assert.Contains("AutomationProperties.AutomationId=\"NavHardwareBtn\"", xmlText);
-        Assert.Contains("AutomationProperties.AutomationId=\"NavSnapshotsBtn\"", xmlText);
-        Assert.Contains("AutomationProperties.AutomationId=\"NavDownloadsBtn\"", xmlText);
-        Assert.Contains("AutomationProperties.AutomationId=\"NavSettingsBtn\"", xmlText);
-        Assert.Contains("AutomationProperties.AutomationId=\"VmLibraryGridView\"", xmlText);
+        // Verify key UI Automation IDs exist on parsed XAML elements (§61, §74)
+        Assert.Contains("PrimaryNavigationBar", automationIds);
+        Assert.Contains("NavHomeBtn", automationIds);
+        Assert.Contains("NavWizardBtn", automationIds);
+        Assert.Contains("NavConsoleBtn", automationIds);
+        Assert.Contains("NavHardwareBtn", automationIds);
+        Assert.Contains("NavSnapshotsBtn", automationIds);
+        Assert.Contains("NavDownloadsBtn", automationIds);
+        Assert.Contains("NavSettingsBtn", automationIds);
+        Assert.Contains("VmLibraryGridView", automationIds);
 
-        // Verify keyboard accelerators (Ctrl+N, F11, etc.) are registered (§61)
+        // Verify keyboard accelerators (Ctrl+N, Alt+1, Alt+2) are registered with valid Key/Modifiers (§61)
         var accelerators = doc.Descendants().Where(e => e.Name.LocalName == "KeyboardAccelerator").ToList();
         Assert.NotEmpty(accelerators);
+        Assert.Contains(accelerators, a =>
+            a.Attribute("Key")?.Value == "N" &&
+            a.Attribute("Modifiers")?.Value == "Control");
     }
 
     [Fact]

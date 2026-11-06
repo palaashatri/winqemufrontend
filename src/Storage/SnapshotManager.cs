@@ -38,6 +38,7 @@ public sealed class SnapshotManager
         }
 
         // Reconcile against actual qcow2 disk snapshots when qemu-img is available and VM is offline
+        var addedImportedSnapshots = false;
         var primaryDisk = vm.Storage.FirstOrDefault(d => d.Media == "disk" && d.Format.Equals("qcow2", StringComparison.OrdinalIgnoreCase));
         if (qemuImg is not null && primaryDisk is not null && File.Exists(primaryDisk.Path))
         {
@@ -48,9 +49,10 @@ public sealed class SnapshotManager
                 {
                     if (!catalog.Snapshots.Any(s => string.Equals(s.Tag, diskSnap.Name, StringComparison.Ordinal)))
                     {
+                        var stableId = $"qcow2_{diskSnap.Name}";
                         catalog.Snapshots.Add(new VmSnapshotRecord
                         {
-                            Id = Guid.NewGuid().ToString("N")[..12],
+                            Id = stableId,
                             Tag = diskSnap.Name,
                             DisplayName = diskSnap.Name,
                             Description = "Imported from QCOW2 snapshot table",
@@ -58,12 +60,18 @@ public sealed class SnapshotManager
                             VmStateSizeBytes = diskSnap.VmStateSizeBytes,
                             IncludesRamState = diskSnap.VmStateSizeBytes > 0
                         });
+                        addedImportedSnapshots = true;
                     }
                 }
             }
             catch
             {
             }
+        }
+
+        if (addedImportedSnapshots)
+        {
+            try { await SaveCatalogAsync(vm, catalog, cancellationToken).ConfigureAwait(false); } catch { }
         }
 
         foreach (var snap in catalog.Snapshots)
@@ -166,11 +174,14 @@ public sealed class SnapshotManager
         string snapshotId,
         QemuImgClient qemuImg,
         ManagedVmSession? activeSession = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IReadOnlyList<VirtualMachine>? allVms = null)
     {
         ArgumentNullException.ThrowIfNull(vm);
         ArgumentException.ThrowIfNullOrWhiteSpace(snapshotId);
         ArgumentNullException.ThrowIfNull(qemuImg);
+
+        CloneManager.EnsureNoDependentLinkedClones(vm, allVms, "restore a snapshot on");
 
         var catalog = await LoadCatalogAsync(vm, qemuImg, cancellationToken).ConfigureAwait(false);
         var record = catalog.Snapshots.FirstOrDefault(s => string.Equals(s.Id, snapshotId, StringComparison.Ordinal))
@@ -231,10 +242,13 @@ public sealed class SnapshotManager
         string snapshotId,
         QemuImgClient qemuImg,
         ManagedVmSession? activeSession = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IReadOnlyList<VirtualMachine>? allVms = null)
     {
         ArgumentNullException.ThrowIfNull(vm);
         ArgumentNullException.ThrowIfNull(qemuImg);
+
+        CloneManager.EnsureNoDependentLinkedClones(vm, allVms, "delete a snapshot on");
 
         var catalog = await LoadCatalogAsync(vm, qemuImg, cancellationToken).ConfigureAwait(false);
         var record = catalog.Snapshots.FirstOrDefault(s => string.Equals(s.Id, snapshotId, StringComparison.Ordinal))
@@ -245,8 +259,14 @@ public sealed class SnapshotManager
 
         if (activeSession is not null && activeSession.StateMachine.IsActiveProcessState)
         {
-            await activeSession.Qmp.HumanMonitorCommandAsync($"delvm {record.Tag}", cancellationToken)
+            var hmpOut = await activeSession.Qmp.HumanMonitorCommandAsync($"delvm {record.Tag}", cancellationToken)
                 .ConfigureAwait(false);
+            if (hmpOut.Contains("Error", StringComparison.OrdinalIgnoreCase) ||
+                hmpOut.Contains("failed", StringComparison.OrdinalIgnoreCase) ||
+                hmpOut.Contains("does not", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException($"QEMU delvm failed: {hmpOut.Trim()}");
+            }
         }
         else if (File.Exists(primaryDisk.Path))
         {

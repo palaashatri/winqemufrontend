@@ -260,17 +260,19 @@ public sealed class FakeQmpServerTests
     public async Task Timeout_And_ServerCrashDisconnect_SurfaceCleanExceptions()
     {
         await using var server = new DeterministicFakeQmpServer();
-        server.CustomCommandHandler = async (req, _) =>
+        server.CustomCommandHandler = (req, _) =>
         {
             var cmd = req["execute"]?.GetValue<string>();
             if (cmd == "hang-forever")
             {
-                await Task.Delay(5000);
+                // Intentionally omit writing a response without blocking the server read loop
+                return Task.CompletedTask;
             }
-            else if (cmd == "crash-now")
+            if (cmd == "crash-now")
             {
                 server.SimulateAbruptCrash();
             }
+            return Task.CompletedTask;
         };
         server.Start();
 
@@ -280,8 +282,9 @@ public sealed class FakeQmpServerTests
         await Assert.ThrowsAsync<TimeoutException>(() =>
             client.ExecuteAsync("hang-forever", timeout: TimeSpan.FromMilliseconds(200)));
 
-        await Assert.ThrowsAnyAsync<Exception>(() =>
+        var disconnectEx = await Assert.ThrowsAsync<IOException>(() =>
             client.ExecuteAsync("crash-now", timeout: TimeSpan.FromSeconds(2)));
+        Assert.False(string.IsNullOrWhiteSpace(disconnectEx.Message));
     }
 
     [Fact]

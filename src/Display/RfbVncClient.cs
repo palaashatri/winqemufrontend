@@ -404,7 +404,11 @@ public sealed class RfbVncClient : IAsyncDisposable
         var width = BinaryPrimitives.ReadUInt16BigEndian(serverInitBuf.AsSpan(0, 2));
         var height = BinaryPrimitives.ReadUInt16BigEndian(serverInitBuf.AsSpan(2, 2));
         var nameLen = BinaryPrimitives.ReadInt32BigEndian(serverInitBuf.AsSpan(20, 4));
-        if (nameLen is > 0 and <= 4096)
+        if (nameLen > 4096)
+        {
+            await DrainBytesAsync(stream, (uint)nameLen, cancellationToken).ConfigureAwait(false);
+        }
+        else if (nameLen > 0)
         {
             var nameBytes = new byte[nameLen];
             await ReadExactAsync(stream, nameBytes, cancellationToken).ConfigureAwait(false);
@@ -478,7 +482,11 @@ public sealed class RfbVncClient : IAsyncDisposable
                         var cutHdr = new byte[7];
                         await ReadExactAsync(_stream, cutHdr, cancellationToken).ConfigureAwait(false);
                         var cutLen = BinaryPrimitives.ReadInt32BigEndian(cutHdr.AsSpan(3, 4));
-                        if (cutLen is > 0 and <= 1024 * 1024)
+                        if (cutLen > 1024 * 1024)
+                        {
+                            await DrainBytesAsync(_stream, (uint)cutLen, cancellationToken).ConfigureAwait(false);
+                        }
+                        else if (cutLen > 0)
                         {
                             var cutBytes = new byte[cutLen];
                             await ReadExactAsync(_stream, cutBytes, cancellationToken).ConfigureAwait(false);
@@ -590,7 +598,7 @@ public sealed class RfbVncClient : IAsyncDisposable
             {
                 w = FramebufferWidth;
                 h = FramebufferHeight;
-                fbSnapshot = _framebuffer;
+                fbSnapshot = (byte[])_framebuffer.Clone();
             }
 
             try
@@ -600,6 +608,27 @@ public sealed class RfbVncClient : IAsyncDisposable
             catch
             {
             }
+        }
+    }
+
+    private static async Task DrainBytesAsync(NetworkStream stream, long byteCount, CancellationToken cancellationToken)
+    {
+        var scratch = new byte[64 * 1024];
+        var remaining = byteCount;
+        while (remaining > 0)
+        {
+            var chunk = (int)Math.Min(scratch.Length, remaining);
+            var offset = 0;
+            while (offset < chunk)
+            {
+                var read = await stream.ReadAsync(scratch.AsMemory(offset, chunk - offset), cancellationToken).ConfigureAwait(false);
+                if (read <= 0)
+                {
+                    throw new EndOfStreamException("VNC stream ended while draining oversized payload.");
+                }
+                offset += read;
+            }
+            remaining -= chunk;
         }
     }
 

@@ -80,7 +80,7 @@ public sealed class QgaClient
         try
         {
             var args = new JsonObject { ["mode"] = mode };
-            await ExecuteCommandAsync("guest-shutdown", args, TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
+            await ExecuteCommandAsync("guest-shutdown", args, TimeSpan.FromSeconds(2), cancellationToken, expectResponse: false).ConfigureAwait(false);
             return true;
         }
         catch
@@ -119,7 +119,8 @@ public sealed class QgaClient
         string command,
         JsonObject? arguments,
         TimeSpan timeout,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool expectResponse = true)
     {
         if (_port <= 0)
         {
@@ -143,6 +144,11 @@ public sealed class QgaClient
         }
 
         await writer.WriteLineAsync(req.ToJsonString().AsMemory(), timeoutCts.Token).ConfigureAwait(false);
+        if (!expectResponse)
+        {
+            return null;
+        }
+
         var line = await reader.ReadLineAsync(timeoutCts.Token).ConfigureAwait(false);
         return string.IsNullOrWhiteSpace(line) ? null : JsonNode.Parse(line) as JsonObject;
     }

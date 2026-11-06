@@ -24,6 +24,7 @@ public sealed class SwtpmManager : IAsyncDisposable
     }
 
     public string TpmStateDirectory => _tpmStateDirectory;
+    public string ControlSocketPath => Path.Combine(_tpmStateDirectory, "swtpm-ctrl.sock");
     public bool IsExternalSwtpmRunning => _externalSwtpmProcess is { HasExited: false };
 
     public static string? LocateExternalSwtpmBinary(string? qemuDirectory = null)
@@ -44,20 +45,19 @@ public sealed class SwtpmManager : IAsyncDisposable
         string? qemuDirectory = null,
         CancellationToken cancellationToken = default)
     {
-        // Initialize per-VM persistent TPM state marker so state is tracked across snapshots & exports
-        var stateFile = Path.Combine(_tpmStateDirectory, "tpm2-00.permall");
-        if (!File.Exists(stateFile))
-        {
-            var initialBytes = new byte[64];
-            RandomNumberGenerator.Fill(initialBytes);
-            await File.WriteAllBytesAsync(stateFile, initialBytes, cancellationToken).ConfigureAwait(false);
-        }
+        // swtpm creates and owns tpm2-00.permall; the directory only needs to exist (§24).
+        Directory.CreateDirectory(_tpmStateDirectory);
 
         var swtpmExe = LocateExternalSwtpmBinary(qemuDirectory);
         if (string.IsNullOrWhiteSpace(swtpmExe))
         {
             // Per Rule #1 (§87): Never claim a live TPM emulator socket unless swtpm is actually running.
             return null;
+        }
+
+        if (File.Exists(ControlSocketPath))
+        {
+            try { File.Delete(ControlSocketPath); } catch { }
         }
 
         var psi = new ProcessStartInfo
@@ -73,7 +73,11 @@ public sealed class SwtpmManager : IAsyncDisposable
         psi.ArgumentList.Add("--tpmstate");
         psi.ArgumentList.Add($"dir={_tpmStateDirectory}");
         psi.ArgumentList.Add("--ctrl");
+        psi.ArgumentList.Add($"type=unixio,path={ControlSocketPath}");
+        psi.ArgumentList.Add("--server");
         psi.ArgumentList.Add($"type=tcp,port={preferredPort},bindaddr=127.0.0.1");
+        psi.ArgumentList.Add("--flags");
+        psi.ArgumentList.Add("not-need-init");
 
         _externalSwtpmProcess = Process.Start(psi);
         await Task.Delay(150, cancellationToken).ConfigureAwait(false);

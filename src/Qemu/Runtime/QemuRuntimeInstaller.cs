@@ -107,11 +107,11 @@ public sealed class QemuRuntimeInstaller
         headResp.EnsureSuccessStatusCode();
 
         var totalBytes = headResp.Content.Headers.ContentLength ?? 0L;
-        if (totalBytes <= 0)
+        var supportsByteRanges = headResp.Headers.AcceptRanges.Any(r =>
+            string.Equals(r, "bytes", StringComparison.OrdinalIgnoreCase));
+        if (totalBytes <= 0 || !supportsByteRanges)
         {
-            await using var s = await client.GetStreamAsync(url, cancellationToken).ConfigureAwait(false);
-            await using var outFs = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None);
-            await s.CopyToAsync(outFs, cancellationToken).ConfigureAwait(false);
+            await DownloadSingleStreamAsync(client, url, destinationPath, cancellationToken).ConfigureAwait(false);
             return;
         }
 
@@ -124,58 +124,85 @@ public sealed class QemuRuntimeInstaller
         var chunkSize = (totalBytes + parallelStreams - 1) / parallelStreams;
         long totalDownloaded = 0;
 
-        var tasks = new List<Task>();
-        for (var i = 0; i < parallelStreams; i++)
+        try
         {
-            var start = i * chunkSize;
-            if (start >= totalBytes)
+            var tasks = new List<Task>();
+            for (var i = 0; i < parallelStreams; i++)
             {
-                break;
-            }
-            var end = Math.Min(totalBytes - 1, start + chunkSize - 1);
-
-            tasks.Add(Task.Run(async () =>
-            {
-                for (var attempt = 0; attempt < 4; attempt++)
+                var start = i * chunkSize;
+                if (start >= totalBytes)
                 {
-                    try
-                    {
-                        using var req = new HttpRequestMessage(HttpMethod.Get, url);
-                        req.Headers.Range = new RangeHeaderValue(start, end);
-                        using var resp = await client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
-                            .ConfigureAwait(false);
-                        resp.EnsureSuccessStatusCode();
-
-                        await using var netStream = await resp.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-                        await using var fs = new FileStream(
-                            destinationPath,
-                            FileMode.Open,
-                            FileAccess.Write,
-                            FileShare.ReadWrite,
-                            bufferSize: 65536,
-                            useAsync: true);
-                        fs.Seek(start, SeekOrigin.Begin);
-
-                        var buffer = new byte[65536];
-                        int read;
-                        while ((read = await netStream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
-                        {
-                            await fs.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
-                            var current = Interlocked.Add(ref totalDownloaded, read);
-                            var pct = 5.0 + (current / (double)totalBytes) * 80.0;
-                            progress?.Report((pct, $"Downloading QEMU ({current / (1024 * 1024)} / {totalBytes / (1024 * 1024)} MiB)..."));
-                        }
-                        break;
-                    }
-                    catch when (attempt < 3 && !cancellationToken.IsCancellationRequested)
-                    {
-                        await Task.Delay(500 * (attempt + 1), cancellationToken).ConfigureAwait(false);
-                    }
+                    break;
                 }
-            }, cancellationToken));
-        }
+                var end = Math.Min(totalBytes - 1, start + chunkSize - 1);
 
-        await Task.WhenAll(tasks).ConfigureAwait(false);
+                tasks.Add(Task.Run(async () =>
+                {
+                    for (var attempt = 0; attempt < 4; attempt++)
+                    {
+                        try
+                        {
+                            using var req = new HttpRequestMessage(HttpMethod.Get, url);
+                            req.Headers.Range = new RangeHeaderValue(start, end);
+                            using var resp = await client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
+                                .ConfigureAwait(false);
+                            resp.EnsureSuccessStatusCode();
+                            if (resp.StatusCode != System.Net.HttpStatusCode.PartialContent)
+                            {
+                                throw new NotSupportedException("Server ignored the HTTP Range request.");
+                            }
+
+                            await using var netStream = await resp.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+                            await using var fs = new FileStream(
+                                destinationPath,
+                                FileMode.Open,
+                                FileAccess.Write,
+                                FileShare.ReadWrite,
+                                bufferSize: 65536,
+                                useAsync: true);
+                            fs.Seek(start, SeekOrigin.Begin);
+
+                            var buffer = new byte[65536];
+                            int read;
+                            while ((read = await netStream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
+                            {
+                                await fs.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+                                var current = Interlocked.Add(ref totalDownloaded, read);
+                                var pct = 5.0 + (current / (double)totalBytes) * 80.0;
+                                progress?.Report((pct, $"Downloading QEMU ({current / (1024 * 1024)} / {totalBytes / (1024 * 1024)} MiB)..."));
+                            }
+                            break;
+                        }
+                        catch (NotSupportedException)
+                        {
+                            throw;
+                        }
+                        catch when (attempt < 3 && !cancellationToken.IsCancellationRequested)
+                        {
+                            await Task.Delay(500 * (attempt + 1), cancellationToken).ConfigureAwait(false);
+                        }
+                    }
+                }, cancellationToken));
+            }
+
+            await Task.WhenAll(tasks).ConfigureAwait(false);
+        }
+        catch (NotSupportedException)
+        {
+            await DownloadSingleStreamAsync(client, url, destinationPath, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static async Task DownloadSingleStreamAsync(
+        HttpClient client,
+        string url,
+        string destinationPath,
+        CancellationToken cancellationToken)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(destinationPath))!);
+        await using var s = await client.GetStreamAsync(url, cancellationToken).ConfigureAwait(false);
+        await using var outFs = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None);
+        await s.CopyToAsync(outFs, cancellationToken).ConfigureAwait(false);
     }
 
     private static async Task ExtractNsisArchiveAsync(

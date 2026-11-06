@@ -140,7 +140,8 @@ public sealed class QemuImgClient
         string destinationPath,
         string destinationFormat = "qcow2",
         bool compress = false,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? snapshotTag = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
@@ -150,6 +151,11 @@ public sealed class QemuImgClient
         if (compress && string.Equals(destinationFormat, "qcow2", StringComparison.OrdinalIgnoreCase))
         {
             args.Add("-c");
+        }
+        if (!string.IsNullOrWhiteSpace(snapshotTag))
+        {
+            args.Add("-l");
+            args.Add($"snapshot.name={snapshotTag}");
         }
         args.Add("-O");
         args.Add(destinationFormat.ToLowerInvariant());

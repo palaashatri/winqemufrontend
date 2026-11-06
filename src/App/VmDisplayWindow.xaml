@@ -4,7 +4,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     Title="Virtual Machine Display">
 
-    <Grid x:Name="RootGrid" Background="#0D1117" KeyDown="OnRootKeyDown" KeyUp="OnRootKeyUp" IsTabStop="True">
+    <Grid x:Name="RootGrid" Background="#0D1117" KeyDown="OnRootKeyDown" KeyUp="OnRootKeyUp" LostFocus="OnRootLostFocus" IsTabStop="True">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />

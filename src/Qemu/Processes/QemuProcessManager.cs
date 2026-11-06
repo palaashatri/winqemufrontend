@@ -28,23 +28,30 @@ public sealed class ManagedVmSession : IAsyncDisposable
     private readonly StringBuilder _serialBuffer = new();
     private readonly Lock _serialLock = new();
     private readonly CancellationTokenSource _sessionCts = new();
+    private VmExclusiveLockHandle? _lockHandle;
+    private IAsyncDisposable? _companionResource;
     private TcpClient? _serialClient;
     private NetworkStream? _serialStream;
     private TimeSpan _lastCpuTime;
     private DateTimeOffset _lastSampleTimeUtc;
+    private VmHostResourceMetrics? _lastSampledMetrics;
 
     public ManagedVmSession(
         VirtualMachine vm,
         QemuLaunchSpec launchSpec,
         Process process,
         QmpClient qmpClient,
-        LogRotator logRotator)
+        LogRotator logRotator,
+        VmExclusiveLockHandle? lockHandle = null,
+        IAsyncDisposable? companionResource = null)
     {
         Vm = vm;
         LaunchSpec = launchSpec;
         _process = process;
         Qmp = qmpClient;
         _logRotator = logRotator;
+        _lockHandle = lockHandle;
+        _companionResource = companionResource;
         StateMachine = new VmStateMachine(vm.Identity.Id, VmState.Starting);
         StartedAtUtc = DateTimeOffset.UtcNow;
         _lastSampleTimeUtc = StartedAtUtc;
@@ -64,6 +71,17 @@ public sealed class ManagedVmSession : IAsyncDisposable
     public int ProcessId => _process.Id;
     public string ActiveAccelerator => LaunchSpec.ActiveAccelerator;
     public ErrorRemediation? LastRemediation { get; private set; }
+    public VmHostResourceMetrics LastSampledMetrics => _lastSampledMetrics ?? SampleHostMetrics();
+
+    public void PreserveLockFileForKeepRunningOnExit()
+    {
+        if (_lockHandle is not null)
+        {
+            _lockHandle.DeleteFileOnDispose = false;
+            _lockHandle.Dispose();
+            _lockHandle = null;
+        }
+    }
 
     public event EventHandler<string>? SerialOutputReceived;
     public event EventHandler<string>? LogLineAppended;
@@ -146,13 +164,20 @@ public sealed class ManagedVmSession : IAsyncDisposable
         {
             if (_process.HasExited)
             {
-                return new VmHostResourceMetrics(0, 0, 0, Vm.Memory.MemoryMiB, TimeSpan.Zero);
+                var exitedMetrics = new VmHostResourceMetrics(0, 0, 0, Vm.Memory.MemoryMiB, TimeSpan.Zero);
+                _lastSampledMetrics = exitedMetrics;
+                return exitedMetrics;
+            }
+
+            var now = DateTimeOffset.UtcNow;
+            var elapsedMs = (now - _lastSampleTimeUtc).TotalMilliseconds;
+            if (elapsedMs < 750 && _lastSampledMetrics is not null)
+            {
+                return _lastSampledMetrics;
             }
 
             _process.Refresh();
-            var now = DateTimeOffset.UtcNow;
             var cpuTime = _process.TotalProcessorTime;
-            var elapsedMs = (now - _lastSampleTimeUtc).TotalMilliseconds;
             var cpuPercent = 0.0;
 
             if (elapsedMs > 50 && _lastCpuTime != TimeSpan.Zero)
@@ -167,16 +192,18 @@ public sealed class ManagedVmSession : IAsyncDisposable
             _lastCpuTime = cpuTime;
             _lastSampleTimeUtc = now;
 
-            return new VmHostResourceMetrics(
+            var sampled = new VmHostResourceMetrics(
                 ProcessId: _process.Id,
                 HostCpuUsagePercent: Math.Round(cpuPercent, 1),
                 HostWorkingSetBytes: _process.WorkingSet64,
                 ConfiguredGuestMemoryMiB: Vm.Memory.MemoryMiB,
                 Uptime: now - StartedAtUtc);
+            _lastSampledMetrics = sampled;
+            return sampled;
         }
         catch
         {
-            return new VmHostResourceMetrics(0, 0, 0, Vm.Memory.MemoryMiB, TimeSpan.Zero);
+            return _lastSampledMetrics ?? new VmHostResourceMetrics(0, 0, 0, Vm.Memory.MemoryMiB, TimeSpan.Zero);
         }
     }
 
@@ -215,7 +242,7 @@ public sealed class ManagedVmSession : IAsyncDisposable
     {
         if (StateMachine.State is VmState.Stopped or VmState.Crashed)
         {
-            VmLockManager.ReleaseLockFile(Vm.DirectoryPath);
+            ReleaseSessionLockAndCompanion();
             return;
         }
 
@@ -254,7 +281,7 @@ public sealed class ManagedVmSession : IAsyncDisposable
         }
         finally
         {
-            VmLockManager.ReleaseLockFile(Vm.DirectoryPath);
+            ReleaseSessionLockAndCompanion();
             if (StateMachine.State != VmState.Stopped)
             {
                 StateMachine.TransitionTo(VmState.Stopped, "VM process stopped");
@@ -303,9 +330,28 @@ public sealed class ManagedVmSession : IAsyncDisposable
         }
     }
 
+    private void ReleaseSessionLockAndCompanion()
+    {
+        var handle = Interlocked.Exchange(ref _lockHandle, null);
+        if (handle is not null)
+        {
+            try { handle.Dispose(); } catch { }
+        }
+        else
+        {
+            VmLockManager.ReleaseLockFile(Vm.DirectoryPath);
+        }
+
+        var companion = Interlocked.Exchange(ref _companionResource, null);
+        if (companion is not null)
+        {
+            try { companion.DisposeAsync().AsTask().GetAwaiter().GetResult(); } catch { }
+        }
+    }
+
     private void OnProcessExited()
     {
-        VmLockManager.ReleaseLockFile(Vm.DirectoryPath);
+        ReleaseSessionLockAndCompanion();
         int exitCode = 0;
         try { exitCode = _process.ExitCode; } catch { }
 
@@ -376,6 +422,16 @@ public sealed class ManagedVmSession : IAsyncDisposable
         await _sessionCts.CancelAsync().ConfigureAwait(false);
         try { _serialClient?.Dispose(); } catch { }
         await Qmp.DisposeAsync().ConfigureAwait(false);
+        var companion = Interlocked.Exchange(ref _companionResource, null);
+        if (companion is not null)
+        {
+            try { await companion.DisposeAsync().ConfigureAwait(false); } catch { }
+        }
+        var handle = Interlocked.Exchange(ref _lockHandle, null);
+        if (handle is not null)
+        {
+            try { await handle.DisposeAsync().ConfigureAwait(false); } catch { }
+        }
         _logRotator.Dispose();
         _process.Dispose();
         _sessionCts.Dispose();
@@ -396,23 +452,35 @@ public sealed class QemuProcessManager : IAsyncDisposable
         VirtualMachine vm,
         QemuLaunchSpec launchSpec,
         TimeSpan? qmpConnectTimeout = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IAsyncDisposable? companionResource = null)
     {
         ArgumentNullException.ThrowIfNull(vm);
         ArgumentNullException.ThrowIfNull(launchSpec);
 
         if (_sessions.TryGetValue(vm.Identity.Id, out var existing) && existing.StateMachine.IsActiveProcessState)
         {
+            if (companionResource is not null)
+            {
+                await companionResource.DisposeAsync().ConfigureAwait(false);
+            }
             throw new InvalidOperationException($"Virtual machine '{vm.Identity.Name}' is already running.");
         }
 
+        VmExclusiveLockHandle? lockHandle = null;
         if (!string.IsNullOrWhiteSpace(vm.DirectoryPath))
         {
-            var existingLock = await VmLockManager.TryReadActiveLockAsync(vm.DirectoryPath, cancellationToken).ConfigureAwait(false);
-            if (existingLock is not null)
+            try
             {
-                throw new InvalidOperationException(
-                    $"Virtual machine '{vm.Identity.Name}' is already running in process PID {existingLock.ProcessId}.");
+                lockHandle = await VmLockManager.AcquireExclusiveLockAsync(vm.DirectoryPath, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                if (companionResource is not null)
+                {
+                    await companionResource.DisposeAsync().ConfigureAwait(false);
+                }
+                throw;
             }
         }
 
@@ -437,25 +505,43 @@ public sealed class QemuProcessManager : IAsyncDisposable
             psi.ArgumentList.Add(arg);
         }
 
-        var proc = Process.Start(psi)
-            ?? throw new InvalidOperationException("Failed to start QEMU process.");
+        Process proc;
+        try
+        {
+            proc = Process.Start(psi)
+                ?? throw new InvalidOperationException("Failed to start QEMU process.");
+        }
+        catch
+        {
+            if (lockHandle is not null)
+            {
+                await lockHandle.DisposeAsync().ConfigureAwait(false);
+            }
+            if (companionResource is not null)
+            {
+                await companionResource.DisposeAsync().ConfigureAwait(false);
+            }
+            logRotator.Dispose();
+            throw;
+        }
 
         var qmpClient = new QmpClient();
-        var session = new ManagedVmSession(vm, launchSpec, proc, qmpClient, logRotator);
+        var session = new ManagedVmSession(vm, launchSpec, proc, qmpClient, logRotator, lockHandle, companionResource);
         session.AttachProcessStreamsAndEvents();
         _sessions[vm.Identity.Id] = session;
 
         try
         {
-            if (!string.IsNullOrWhiteSpace(vm.DirectoryPath))
+            if (lockHandle is not null)
             {
-                await VmLockManager.WriteLockFileAsync(
-                    vm.DirectoryPath,
+                DateTimeOffset startTimeUtc = DateTimeOffset.UtcNow;
+                try { startTimeUtc = proc.StartTime.ToUniversalTime(); } catch { }
+                await lockHandle.WriteRecordAsync(
                     new VmProcessLockRecord
                     {
                         VmId = vm.Identity.Id,
                         ProcessId = proc.Id,
-                        ProcessStartTimeUtc = DateTimeOffset.UtcNow,
+                        ProcessStartTimeUtc = startTimeUtc,
                         QmpPort = launchSpec.Endpoints.QmpPort,
                         VncPort = launchSpec.Endpoints.VncPort,
                         SerialPort = launchSpec.Endpoints.SerialPort,
@@ -490,10 +576,93 @@ public sealed class QemuProcessManager : IAsyncDisposable
             {
             }
 
-            VmLockManager.ReleaseLockFile(vm.DirectoryPath);
+            if (lockHandle is not null)
+            {
+                await lockHandle.DisposeAsync().ConfigureAwait(false);
+            }
+            else
+            {
+                VmLockManager.ReleaseLockFile(vm.DirectoryPath);
+            }
+
+            if (companionResource is not null)
+            {
+                try { await companionResource.DisposeAsync().ConfigureAwait(false); } catch { }
+            }
+
             var remediation = ErrorTranslator.Translate(ex.Message);
             session.StateMachine.TransitionTo(VmState.Crashed, "Failed during startup/QMP handshake", remediation.UserFriendlyExplanation);
             throw;
+        }
+    }
+
+    public async Task<ManagedVmSession?> TryReattachSessionAsync(
+        VirtualMachine vm,
+        VmProcessLockRecord lockRecord,
+        string executablePath,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(vm);
+        ArgumentNullException.ThrowIfNull(lockRecord);
+
+        if (_sessions.TryGetValue(vm.Identity.Id, out var existing) && existing.StateMachine.IsActiveProcessState)
+        {
+            return existing;
+        }
+
+        try
+        {
+            var proc = Process.GetProcessById(lockRecord.ProcessId);
+            if (proc.HasExited || !VmLockManager.IsMatchingQemuProcessAlive(lockRecord))
+            {
+                proc.Dispose();
+                VmLockManager.ReleaseLockFile(vm.DirectoryPath);
+                return null;
+            }
+
+            var qmpClient = new QmpClient();
+            await qmpClient.ConnectTcpLoopbackAsync(
+                lockRecord.QmpPort,
+                TimeSpan.FromSeconds(3),
+                cancellationToken).ConfigureAwait(false);
+
+            var endpoints = new QemuRuntimeEndpoints(
+                QmpPort: lockRecord.QmpPort,
+                VncPort: lockRecord.VncPort,
+                SerialPort: lockRecord.SerialPort,
+                GuestAgentPort: null,
+                TpmEmulatorPort: null);
+
+            var launchSpec = new QemuLaunchSpec(
+                ExecutablePath: executablePath,
+                ArgumentList: [],
+                WorkingDirectory: vm.DirectoryPath ?? Environment.CurrentDirectory,
+                ActiveAccelerator: lockRecord.ActiveAccelerator,
+                Endpoints: endpoints,
+                FormattedCommandLine: $"{executablePath} (reattached PID {lockRecord.ProcessId})");
+
+            var logPath = !string.IsNullOrWhiteSpace(vm.DirectoryPath)
+                ? Path.Combine(VmDirectoryLayout.GetLogsDirectory(vm.DirectoryPath), "qemu-runtime.log")
+                : Path.Combine(Path.GetTempPath(), $"winqemu-{vm.Identity.Id}.log");
+            var logRotator = new LogRotator(logPath);
+
+            var session = new ManagedVmSession(vm, launchSpec, proc, qmpClient, logRotator);
+            proc.EnableRaisingEvents = true;
+            proc.Exited += (_, _) => session.ForceStopAsync().GetAwaiter().GetResult();
+            qmpClient.EventReceived += (_, e) => session.AppendLog("QMP-EVENT", e.EventName);
+
+            var status = await qmpClient.QueryStatusAsync(cancellationToken).ConfigureAwait(false);
+            var mappedState = session.StateMachine.MapQmpRunState(status.Status);
+            session.StateMachine.TransitionTo(
+                mappedState == VmState.Starting ? VmState.Running : mappedState,
+                $"Reattached to running QEMU process PID {lockRecord.ProcessId} ({status.Status})");
+
+            _sessions[vm.Identity.Id] = session;
+            return session;
+        }
+        catch
+        {
+            return null;
         }
     }
 

@@ -90,7 +90,8 @@ public sealed partial class LogRotator : IDisposable
             return string.Empty;
         }
 
-        var result = PasswordRegex().Replace(text, "$1=[REDACTED]");
+        var result = AuthSchemeRegex().Replace(text, "$1 [REDACTED]");
+        result = PasswordRegex().Replace(result, "$1=[REDACTED]");
         result = TokenRegex().Replace(result, "$1=[REDACTED]");
         return result;
     }
@@ -146,9 +147,12 @@ public sealed partial class LogRotator : IDisposable
         }
     }
 
-    [GeneratedRegex(@"(?i)(password|passwd|secret|passphrase|credential)\s*[:=]\s*\S+")]
+    [GeneratedRegex(@"(?i)(password|passwd|secret|passphrase|credential)[""']?\s*[:=]\s*[""']?[^\s""']+")]
     private static partial Regex PasswordRegex();
 
-    [GeneratedRegex(@"(?i)(token|apikey|api_key|authorization|bearer)\s*[:=]\s*\S+")]
+    [GeneratedRegex(@"(?i)(token|apikey|api_key|authorization|bearer)[""']?\s*[:=]\s*[""']?[^\s""']+")]
     private static partial Regex TokenRegex();
+
+    [GeneratedRegex(@"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=\-]{8,}")]
+    private static partial Regex AuthSchemeRegex();
 }

@@ -31,8 +31,13 @@ public sealed class AppSettingsStore
             EnsureDirectoriesExist(settings);
             return settings;
         }
-        catch
+        catch (OperationCanceledException)
         {
+            throw;
+        }
+        catch (JsonException)
+        {
+            File.Move(_settingsFilePath, $"{_settingsFilePath}.corrupt", overwrite: true);
             var fallback = new AppSettings();
             EnsureDirectoriesExist(fallback);
             return fallback;

@@ -17,8 +17,99 @@ public sealed class VmProcessLockRecord
     public DateTimeOffset AcquiredAtUtc { get; set; } = DateTimeOffset.UtcNow;
 }
 
+public sealed class VmExclusiveLockHandle : IAsyncDisposable, IDisposable
+{
+    private FileStream? _stream;
+    private readonly string _vmDirectory;
+    private bool _deleteOnDispose = true;
+
+    internal VmExclusiveLockHandle(string vmDirectory, FileStream stream)
+    {
+        _vmDirectory = vmDirectory;
+        _stream = stream;
+    }
+
+    public string VmDirectory => _vmDirectory;
+
+    /// <summary>
+    /// When set to false (e.g., when closing the app with 'Keep VMs running'),
+    /// disposing the handle releases the FileStream without deleting vm.lock.json.
+    /// </summary>
+    public bool DeleteFileOnDispose
+    {
+        get => _deleteOnDispose;
+        set => _deleteOnDispose = value;
+    }
+
+    public async Task WriteRecordAsync(VmProcessLockRecord record, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(record);
+        if (_stream is null)
+        {
+            throw new ObjectDisposedException(nameof(VmExclusiveLockHandle));
+        }
+
+        var jsonBytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(record, VmConfigurationStore.JsonOptions));
+        _stream.Position = 0;
+        _stream.SetLength(0);
+        await _stream.WriteAsync(jsonBytes, cancellationToken).ConfigureAwait(false);
+        await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public void Dispose()
+    {
+        var s = Interlocked.Exchange(ref _stream, null);
+        if (s is not null)
+        {
+            try { s.Dispose(); } catch { }
+            if (_deleteOnDispose)
+            {
+                VmLockManager.ReleaseLockFile(_vmDirectory);
+            }
+        }
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        Dispose();
+        return ValueTask.CompletedTask;
+    }
+}
+
 public static class VmLockManager
 {
+    /// <summary>
+    /// Acquires and retains an exclusive write lock on vm.lock.json before QEMU starts (§58),
+    /// preventing concurrent app instances from starting the same VM simultaneously.
+    /// </summary>
+    public static async Task<VmExclusiveLockHandle> AcquireExclusiveLockAsync(
+        string vmDirectory,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(vmDirectory);
+        VmDirectoryLayout.EnsureStructure(vmDirectory);
+
+        var activeLock = await TryReadActiveLockAsync(vmDirectory, cancellationToken).ConfigureAwait(false);
+        if (activeLock is not null)
+        {
+            throw new InvalidOperationException(
+                $"VM at '{vmDirectory}' is already locked by running QEMU process PID {activeLock.ProcessId} (QMP port {activeLock.QmpPort}).");
+        }
+
+        var lockPath = VmDirectoryLayout.GetLockPath(vmDirectory);
+        try
+        {
+            // FileShare.Read allows TryReadActiveLockAsync to inspect the file while preventing concurrent writers.
+            var stream = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
+            return new VmExclusiveLockHandle(vmDirectory, stream);
+        }
+        catch (IOException ex)
+        {
+            throw new InvalidOperationException(
+                $"VM at '{vmDirectory}' is currently locked by another WinQEMU session.", ex);
+        }
+    }
+
     public static async Task WriteLockFileAsync(
         string vmDirectory,
         VmProcessLockRecord record,
@@ -53,7 +144,14 @@ public static class VmLockManager
 
         try
         {
-            var json = await File.ReadAllTextAsync(lockPath, Encoding.UTF8, cancellationToken).ConfigureAwait(false);
+            await using var fs = new FileStream(lockPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new StreamReader(fs, Encoding.UTF8);
+            var json = await reader.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(json))
+            {
+                return null;
+            }
+
             var record = JsonSerializer.Deserialize<VmProcessLockRecord>(json, VmConfigurationStore.JsonOptions);
             if (record is null || record.ProcessId <= 0)
             {
@@ -108,6 +206,12 @@ public static class VmLockManager
 
             var processName = process.ProcessName;
             if (!processName.StartsWith("qemu-system-", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            if (record.ProcessStartTimeUtc != default &&
+                Math.Abs((process.StartTime.ToUniversalTime() - record.ProcessStartTimeUtc.UtcDateTime).TotalSeconds) > 2)
             {
                 return false;
             }

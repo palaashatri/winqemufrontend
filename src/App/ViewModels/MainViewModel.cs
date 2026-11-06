@@ -229,26 +229,59 @@ public sealed class MainViewModel : IAsyncDisposable
             cancellationToken);
     }
 
+    public async Task<QemuRuntimeInfo> InstallManagedQemuRuntimeAsync(
+        IProgress<(double Percent, string Status)>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        var installer = new QemuRuntimeInstaller();
+        var targetDir = !string.IsNullOrWhiteSpace(Settings.ManagedQemuDirectory)
+            ? Settings.ManagedQemuDirectory
+            : AppSettings.GetDefaultManagedQemuDirectory();
+        await installer.DownloadVerifyAndExtractAsync(
+            targetDir,
+            () => _processManager.ActiveSessions.Any(s => s.StateMachine.IsActiveProcessState),
+            QemuRuntimeInstaller.DefaultRelease,
+            progress,
+            cancellationToken);
+        await RefreshRuntimeAndAccelerationAsync(cancellationToken);
+        return RuntimeInfo;
+    }
+
     public async Task ReloadVmLibraryAsync(CancellationToken cancellationToken = default)
     {
-        var loaded = await _vmStore.LoadAllFromLibraryAsync(Settings.VmStorageDirectory, cancellationToken)
-            ;
+        var previousSelectedId = SelectedVm?.Id;
+        var loaded = await _vmStore.LoadAllFromLibraryAsync(Settings.VmStorageDirectory, cancellationToken);
 
         AllVms.Clear();
         foreach (var vm in loaded)
         {
             var card = new VmCardItem(vm);
             var activeSession = _processManager.GetSession(vm.Identity.Id);
+            if (activeSession is null && !string.IsNullOrWhiteSpace(vm.DirectoryPath))
+            {
+                var activeLock = await VmLockManager.TryReadActiveLockAsync(vm.DirectoryPath, cancellationToken);
+                if (activeLock is not null)
+                {
+                    var binPath = RuntimeInfo.TargetBinaries.GetValueOrDefault(vm.Architecture)
+                        ?? Path.Combine(RuntimeInfo.DirectoryPath, $"{vm.Architecture.ToQemuSystemBinaryName()}.exe");
+                    activeSession = await _processManager.TryReattachSessionAsync(vm, activeLock, binPath, cancellationToken);
+                }
+            }
+
             if (activeSession is not null)
             {
                 card.State = activeSession.StateMachine.State;
                 card.ActiveAccelerator = activeSession.ActiveAccelerator;
+                SubscribeSessionStateChanges(card, activeSession);
             }
             AllVms.Add(card);
         }
 
         ApplyFilter();
-        SelectedVm ??= FilteredVms.FirstOrDefault();
+        SelectedVm = (previousSelectedId is null
+            ? null
+            : AllVms.FirstOrDefault(c => c.Id == previousSelectedId))
+            ?? FilteredVms.FirstOrDefault();
     }
 
     public void ApplyFilter()
@@ -311,7 +344,8 @@ public sealed class MainViewModel : IAsyncDisposable
             vm.Integration.UnattendedInstall.BypassWindows11Requirements = bypassWin11Checks;
 
             var seedIsoPath = Path.Combine(vmDir, VmDirectoryLayout.DisksSubdir, "express-seed.iso");
-            if (preset.OsFamily == GuestOsFamily.Windows)
+            if (preset.OsFamily == GuestOsFamily.Windows ||
+                vm.Integration.UnattendedInstall.Mode == UnattendedInstallMode.WindowsAutounattend)
             {
                 var xml = UnattendedInstallGenerator.GenerateWindowsAutounattendXml(
                     vm.Integration.UnattendedInstall, transientPassword);
@@ -319,6 +353,23 @@ public sealed class MainViewModel : IAsyncDisposable
                     seedIsoPath,
                     "OEMDRV",
                     [new IsoFileEntry("Autounattend.xml", Encoding.UTF8.GetBytes(xml))]);
+            }
+            else if (vm.Integration.UnattendedInstall.Mode == UnattendedInstallMode.Preseed)
+            {
+                var preseed = UnattendedInstallGenerator.GenerateDebianPreseedCfg(
+                    vm.Integration.UnattendedInstall, transientPassword);
+                var (_, userData) = UnattendedInstallGenerator.GenerateCloudInitFiles(
+                    vm.Integration.UnattendedInstall, transientPassword);
+                var metaData = UnattendedInstallGenerator.GenerateCloudInitMetaData(
+                    vm.Integration.UnattendedInstall, vm.Identity.Id);
+                Iso9660Builder.CreateDataIso(
+                    seedIsoPath,
+                    "CIDATA",
+                    [
+                        new IsoFileEntry("preseed.cfg", Encoding.UTF8.GetBytes(preseed)),
+                        new IsoFileEntry("user-data", Encoding.UTF8.GetBytes(userData)),
+                        new IsoFileEntry("meta-data", Encoding.UTF8.GetBytes(metaData))
+                    ]);
             }
             else
             {
@@ -481,7 +532,7 @@ public sealed class MainViewModel : IAsyncDisposable
             MultiArchBootImageFactory.CreateBootableHybridDiskImage(
                 rawDiskPath,
                 item.BannerTitle,
-                item.Subtitle,
+                $"{item.Subtitle} [Synthetic Boot Validation Media]",
                 item.KernelInfo,
                 item.Prompt,
                 item.ColorAttr);
@@ -490,7 +541,7 @@ public sealed class MainViewModel : IAsyncDisposable
                 isoPath,
                 "WINQEMUBOOT",
                 item.BannerTitle,
-                item.Subtitle,
+                $"{item.Subtitle} [Synthetic Boot Validation Media]",
                 item.KernelInfo,
                 item.Prompt,
                 item.ColorAttr);
@@ -503,6 +554,11 @@ public sealed class MainViewModel : IAsyncDisposable
                 customMemoryMiB: 512,
                 customVcpus: item.Arch == VmArchitecture.Ppc64 ? 1 : 2,
                 customDiskGiB: 8);
+
+            if (!vm.Identity.Tags.Contains("showcase-boot-test", StringComparer.OrdinalIgnoreCase))
+            {
+                vm.Identity.Tags.Add("showcase-boot-test");
+            }
 
             vm.Architecture = item.Arch;
             if (item.Name.Contains("FreeBSD", StringComparison.OrdinalIgnoreCase))
@@ -574,7 +630,10 @@ public sealed class MainViewModel : IAsyncDisposable
         return createdCards;
     }
 
-    public QemuLaunchSpec BuildLaunchSpecForVm(VirtualMachine vm, QemuRuntimeEndpoints? endpoints = null)
+    public QemuLaunchSpec BuildLaunchSpecForVm(
+        VirtualMachine vm,
+        QemuRuntimeEndpoints? endpoints = null,
+        VmAcceleratorMode? acceleratorOverride = null)
     {
         var ep = endpoints ?? QemuCommandBuilder.AllocateLocalEndpoints(vm);
         var binPath = RuntimeInfo.TargetBinaries.GetValueOrDefault(vm.Architecture)
@@ -588,7 +647,8 @@ public sealed class MainViewModel : IAsyncDisposable
             caps,
             isWhpxWorking: IsWhpxWorking && Settings.PreferWhpxWhenAvailable,
             endpoints: ep,
-            firmware: fw);
+            firmware: fw,
+            acceleratorOverride: acceleratorOverride);
     }
 
     public async Task<ManagedVmSession> StartVmAsync(
@@ -605,16 +665,43 @@ public sealed class MainViewModel : IAsyncDisposable
             }
         }
 
+        // Prevent starting a parent VM whose disk is actively used as a backing file by linked clones (§45)
+        CloneManager.EnsureNoDependentLinkedClones(
+            card.Vm,
+            AllVms.Select(c => c.Vm).ToList(),
+            "start");
+
         card.State = VmState.Starting;
         var endpoints = QemuCommandBuilder.AllocateLocalEndpoints(card.Vm);
+        SwtpmManager? swtpm = null;
 
-        // Start managed swtpm if TPM 2.0 is enabled and external swtpm exists (§24)
-        if (card.Vm.Security.EnableTpm2 && !string.IsNullOrWhiteSpace(card.Vm.DirectoryPath) && endpoints.TpmEmulatorPort is > 0)
+        // Start managed swtpm when TPM 2.0 is enabled; fail honestly if swtpm is missing (§24, §87)
+        if (card.Vm.Security.EnableTpm2)
         {
-            var swtpm = new SwtpmManager(VmDirectoryLayout.GetTpmStateDirectory(card.Vm.DirectoryPath));
-            var activeTpmPort = await swtpm.StartIfAvailableAsync(endpoints.TpmEmulatorPort.Value, RuntimeInfo.DirectoryPath, cancellationToken)
-                ;
-            endpoints = endpoints with { TpmEmulatorPort = activeTpmPort };
+            if (string.IsNullOrWhiteSpace(card.Vm.DirectoryPath) || endpoints.TpmEmulatorPort is not > 0)
+            {
+                card.State = VmState.Stopped;
+                throw new InvalidOperationException("TPM 2.0 requires a persisted VM storage directory and local control port (§24).");
+            }
+
+            swtpm = new SwtpmManager(VmDirectoryLayout.GetTpmStateDirectory(card.Vm.DirectoryPath));
+            var activeTpmPort = await swtpm.StartIfAvailableAsync(
+                endpoints.TpmEmulatorPort.Value,
+                RuntimeInfo.DirectoryPath,
+                cancellationToken);
+            if (activeTpmPort is null)
+            {
+                await swtpm.DisposeAsync();
+                card.State = VmState.Stopped;
+                throw new InvalidOperationException(
+                    "TPM 2.0 is enabled for this VM, but the swtpm binary was not found. Install swtpm or disable TPM 2.0 in Hardware settings (§24).");
+            }
+
+            endpoints = endpoints with
+            {
+                TpmEmulatorPort = activeTpmPort,
+                TpmSocketPath = swtpm.ControlSocketPath
+            };
         }
 
         var spec = BuildLaunchSpecForVm(card.Vm, endpoints);
@@ -622,8 +709,12 @@ public sealed class MainViewModel : IAsyncDisposable
 
         try
         {
-            var session = await _processManager.StartVmAsync(card.Vm, spec, cancellationToken: cancellationToken)
-                ;
+            var session = await _processManager.StartVmAsync(
+                card.Vm,
+                spec,
+                companionResource: swtpm,
+                cancellationToken: cancellationToken);
+            SubscribeSessionStateChanges(card, session);
             card.State = session.StateMachine.State;
             card.Vm.Metadata.LastStartedAtUtc = DateTimeOffset.UtcNow;
             if (!string.IsNullOrWhiteSpace(card.Vm.DirectoryPath))
@@ -634,21 +725,114 @@ public sealed class MainViewModel : IAsyncDisposable
         }
         catch when (spec.ActiveAccelerator == "whpx")
         {
-            // Automatic resilient fallback to TCG if WHPX partition setup fails on a specific guest config
-            card.Vm.Accelerator = VmAcceleratorMode.Tcg;
-            var fallbackEndpoints = QemuCommandBuilder.AllocateLocalEndpoints(card.Vm) with { TpmEmulatorPort = null };
-            var fallbackSpec = BuildLaunchSpecForVm(card.Vm, fallbackEndpoints);
-            card.ActiveAccelerator = fallbackSpec.ActiveAccelerator;
+            // Automatic resilient fallback to TCG if WHPX partition setup fails on a specific guest config,
+            // without mutating the user's saved card.Vm.Accelerator preference.
+            SwtpmManager? fallbackSwtpm = null;
+            try
+            {
+                var fallbackEndpoints = QemuCommandBuilder.AllocateLocalEndpoints(card.Vm);
+                if (card.Vm.Security.EnableTpm2 &&
+                    !string.IsNullOrWhiteSpace(card.Vm.DirectoryPath) &&
+                    fallbackEndpoints.TpmEmulatorPort is > 0)
+                {
+                    fallbackSwtpm = new SwtpmManager(VmDirectoryLayout.GetTpmStateDirectory(card.Vm.DirectoryPath));
+                    var activeTpmPort = await fallbackSwtpm.StartIfAvailableAsync(
+                        fallbackEndpoints.TpmEmulatorPort.Value,
+                        RuntimeInfo.DirectoryPath,
+                        cancellationToken);
+                    if (activeTpmPort is null)
+                    {
+                        await fallbackSwtpm.DisposeAsync();
+                        throw new InvalidOperationException(
+                            "TPM 2.0 is enabled for this VM, but the swtpm binary could not be started during TCG fallback (§24).");
+                    }
 
-            var session = await _processManager.StartVmAsync(card.Vm, fallbackSpec, cancellationToken: cancellationToken)
-                ;
-            card.State = session.StateMachine.State;
-            return session;
+                    fallbackEndpoints = fallbackEndpoints with
+                    {
+                        TpmEmulatorPort = activeTpmPort,
+                        TpmSocketPath = fallbackSwtpm.ControlSocketPath
+                    };
+                }
+
+                var fallbackSpec = BuildLaunchSpecForVm(card.Vm, fallbackEndpoints, VmAcceleratorMode.Tcg);
+                card.ActiveAccelerator = fallbackSpec.ActiveAccelerator;
+
+                var session = await _processManager.StartVmAsync(
+                    card.Vm,
+                    fallbackSpec,
+                    companionResource: fallbackSwtpm,
+                    cancellationToken: cancellationToken);
+                SubscribeSessionStateChanges(card, session);
+                card.State = session.StateMachine.State;
+                card.Vm.Metadata.LastStartedAtUtc = DateTimeOffset.UtcNow;
+                if (!string.IsNullOrWhiteSpace(card.Vm.DirectoryPath))
+                {
+                    await _vmStore.SaveAsync(card.Vm, card.Vm.DirectoryPath, cancellationToken);
+                }
+                return session;
+            }
+            catch
+            {
+                if (fallbackSwtpm is not null)
+                {
+                    try { await fallbackSwtpm.DisposeAsync(); } catch { }
+                }
+                card.State = VmState.Crashed;
+                throw;
+            }
         }
         catch
         {
             card.State = VmState.Crashed;
             throw;
+        }
+    }
+
+    private void SubscribeSessionStateChanges(VmCardItem card, ManagedVmSession session)
+    {
+        session.StateMachine.StateChanged += (_, e) =>
+        {
+            var dq = App.CurrentMainWindow?.DispatcherQueue;
+            if (dq is not null)
+            {
+                dq.TryEnqueue(() => card.State = e.CurrentState);
+            }
+            else
+            {
+                card.State = e.CurrentState;
+            }
+
+            if (e.CurrentState is VmState.Stopped or VmState.Crashed)
+            {
+                _ = CleanupSeedMediaAfterInstallAsync(card.Vm);
+            }
+        };
+    }
+
+    private async Task CleanupSeedMediaAfterInstallAsync(VirtualMachine vm)
+    {
+        var seedPath = vm.Integration.UnattendedInstall.GeneratedSeedMediaPath;
+        if (string.IsNullOrWhiteSpace(seedPath))
+        {
+            return;
+        }
+
+        try
+        {
+            if (File.Exists(seedPath))
+            {
+                File.Delete(seedPath);
+            }
+
+            vm.Integration.UnattendedInstall.GeneratedSeedMediaPath = null;
+            vm.Integration.UnattendedInstall.Enabled = false;
+            if (!string.IsNullOrWhiteSpace(vm.DirectoryPath))
+            {
+                await _vmStore.SaveAsync(vm, vm.DirectoryPath);
+            }
+        }
+        catch
+        {
         }
     }
 
@@ -673,12 +857,12 @@ public sealed class MainViewModel : IAsyncDisposable
 
     public ReadinessScoreReport BuildReadinessScoreReport() =>
         ReadinessScoreCalculator.Evaluate(
-            hasQemuRuntime: RuntimeInfo.IsAvailable,
+            hasQemuRuntime: RuntimeInfo.IsAvailable && RuntimeInfo.TargetBinaries.Count > 0,
             hasWhpxDetection: WhpxReport is not null,
-            hasEmbeddedVncDisplay: true,
-            hasSnapshotsAndCloning: true,
-            hasWindows11NativeUi: true,
-            hasPackagingAndLicenses: true);
+            hasEmbeddedVncDisplay: RuntimeInfo.IsAvailable && typeof(RfbVncClient).Assembly is not null,
+            hasSnapshotsAndCloning: !string.IsNullOrWhiteSpace(RuntimeInfo.QemuImgPath) && File.Exists(RuntimeInfo.QemuImgPath),
+            hasWindows11NativeUi: RuntimeInformation.IsOSPlatform(OSPlatform.Windows),
+            hasPackagingAndLicenses: RuntimeInfo.IsAvailable && Directory.Exists(Settings.VmStorageDirectory));
 
     public ValueTask DisposeAsync() => _processManager.DisposeAsync();
 }

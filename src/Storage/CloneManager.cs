@@ -1,5 +1,6 @@
 using System.Text.Json;
 using WinQemu.Core.Configuration;
+using WinQemu.Core.Lifecycle;
 using WinQemu.Core.Models;
 using WinQemu.Qemu.QemuImg;
 
@@ -14,7 +15,7 @@ public enum VmCloneKind
 /// <summary>
 /// Implements full and linked VM cloning, cloning from a specific snapshot, and
 /// explicit backing-file dependency graph protection so parent disks with dependent
-/// linked clones can never be accidentally deleted (§44, §45).
+/// linked clones can never be accidentally deleted or modified in-place (§44, §45).
 /// </summary>
 public sealed class CloneManager
 {
@@ -38,6 +39,16 @@ public sealed class CloneManager
         ArgumentException.ThrowIfNullOrWhiteSpace(cloneName);
         ArgumentException.ThrowIfNullOrWhiteSpace(targetLibraryDirectory);
         ArgumentNullException.ThrowIfNull(qemuImg);
+
+        if (!string.IsNullOrWhiteSpace(sourceVm.DirectoryPath))
+        {
+            var activeLock = await VmLockManager.TryReadActiveLockAsync(sourceVm.DirectoryPath, cancellationToken).ConfigureAwait(false);
+            if (activeLock is not null)
+            {
+                throw new InvalidOperationException(
+                    $"Cannot clone '{sourceVm.Identity.Name}' while it is running (PID {activeLock.ProcessId}). Shut down or stop the source VM before cloning its disks (§45).");
+            }
+        }
 
         // Deep copy configuration via JSON round-trip
         var clonedVm = JsonSerializer.Deserialize<VirtualMachine>(
@@ -122,12 +133,8 @@ public sealed class CloneManager
                     destinationPath: dstDiskPath,
                     destinationFormat: "qcow2",
                     compress: false,
-                    cancellationToken: cancellationToken).ConfigureAwait(false);
-
-                if (!string.IsNullOrWhiteSpace(fromSnapshotTag))
-                {
-                    await qemuImg.ApplySnapshotAsync(dstDiskPath, fromSnapshotTag, cancellationToken).ConfigureAwait(false);
-                }
+                    cancellationToken: cancellationToken,
+                    snapshotTag: fromSnapshotTag).ConfigureAwait(false);
 
                 dstDisk.Path = dstDiskPath;
                 dstDisk.Format = "qcow2";
@@ -137,6 +144,24 @@ public sealed class CloneManager
 
         await _configStore.SaveAsync(clonedVm, cloneDir, cancellationToken).ConfigureAwait(false);
         return clonedVm;
+    }
+
+    public static void EnsureNoDependentLinkedClones(
+        VirtualMachine targetVm,
+        IReadOnlyList<VirtualMachine>? allVms,
+        string operationName)
+    {
+        if (allVms is null || allVms.Count == 0)
+        {
+            return;
+        }
+
+        var dependents = GetDependentLinkedCloneNames(targetVm, allVms);
+        if (dependents.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"Cannot {operationName} '{targetVm.Identity.Name}' because linked clone(s) depend on its base disk: {string.Join(", ", dependents)} (§45).");
+        }
     }
 
     public static IReadOnlyList<DiskDependencyNode> BuildDependencyGraph(IReadOnlyList<VirtualMachine> allVms)

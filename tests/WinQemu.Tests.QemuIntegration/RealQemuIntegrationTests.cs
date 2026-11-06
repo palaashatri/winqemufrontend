@@ -16,16 +16,25 @@ using Xunit;
 
 namespace WinQemu.Tests.QemuIntegration;
 
-public sealed class RealQemuIntegrationTests
+public sealed class RequiresQemuFactAttribute : FactAttribute
 {
-    [Fact]
-    public async Task RealQemu_TcgLifecycle_DiskSnapshotCloneAndVncFramebufferTest()
+    public RequiresQemuFactAttribute()
     {
         var runtime = QemuRuntimeLocator.Discover();
         if (!runtime.IsAvailable || runtime.QemuSystemX86_64Path is null || runtime.QemuImgPath is null)
         {
-            return; // Skipped only if QEMU binary is not yet installed on machine
+            Skip = "QEMU runtime binaries are not installed on this machine.";
         }
+    }
+}
+
+public sealed class RealQemuIntegrationTests
+{
+    [RequiresQemuFact]
+    public async Task RealQemu_TcgLifecycle_DiskSnapshotCloneAndVncFramebufferTest()
+    {
+        var runtime = QemuRuntimeLocator.Discover();
+        Assert.True(runtime.IsAvailable && runtime.QemuSystemX86_64Path is not null && runtime.QemuImgPath is not null);
 
         var testRoot = Path.Combine(Path.GetTempPath(), $"winqemu-int-{Guid.NewGuid():N}");
         Directory.CreateDirectory(testRoot);
@@ -127,14 +136,11 @@ public sealed class RealQemuIntegrationTests
         }
     }
 
-    [Fact]
+    [RequiresQemuFact]
     public async Task RealQemu_WhpxProbeAndHardwareAcceleratedSmokeTest()
     {
         var runtime = QemuRuntimeLocator.Discover();
-        if (!runtime.IsAvailable || runtime.QemuSystemX86_64Path is null)
-        {
-            return;
-        }
+        Assert.True(runtime.IsAvailable && runtime.QemuSystemX86_64Path is not null);
 
         var report = await WhpxDetector.ProbeAsync(runtime.QemuSystemX86_64Path);
         Assert.NotNull(report.UserFriendlyTitle);
@@ -178,14 +184,11 @@ public sealed class RealQemuIntegrationTests
         }
     }
 
-    [Fact]
+    [RequiresQemuFact]
     public async Task RealQemu_MultiArchitectureBoot_I386_Aarch64_Riscv64_Ppc64Test()
     {
         var runtime = QemuRuntimeLocator.Discover();
-        if (!runtime.IsAvailable)
-        {
-            return;
-        }
+        Assert.True(runtime.IsAvailable);
 
         var testRoot = Path.Combine(Path.GetTempPath(), $"winqemu-multiarch-{Guid.NewGuid():N}");
         Directory.CreateDirectory(testRoot);

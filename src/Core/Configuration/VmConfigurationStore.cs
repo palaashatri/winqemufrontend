@@ -168,28 +168,7 @@ public sealed class VmConfigurationStore
         Directory.CreateDirectory(targetParentDirectory);
         Directory.Move(oldDir, newDir);
 
-        foreach (var disk in vm.Storage)
-        {
-            if (!string.IsNullOrWhiteSpace(disk.Path) && disk.Path.StartsWith(oldDir, StringComparison.OrdinalIgnoreCase))
-            {
-                var relative = Path.GetRelativePath(oldDir, disk.Path);
-                disk.Path = Path.Combine(newDir, relative);
-            }
-        }
-
-        if (!string.IsNullOrWhiteSpace(vm.Firmware.VarsFilePath) &&
-            vm.Firmware.VarsFilePath.StartsWith(oldDir, StringComparison.OrdinalIgnoreCase))
-        {
-            var relative = Path.GetRelativePath(oldDir, vm.Firmware.VarsFilePath);
-            vm.Firmware.VarsFilePath = Path.Combine(newDir, relative);
-        }
-
-        if (!string.IsNullOrWhiteSpace(vm.Metadata.LastScreenshotPath) &&
-            vm.Metadata.LastScreenshotPath.StartsWith(oldDir, StringComparison.OrdinalIgnoreCase))
-        {
-            var relative = Path.GetRelativePath(oldDir, vm.Metadata.LastScreenshotPath);
-            vm.Metadata.LastScreenshotPath = Path.Combine(newDir, relative);
-        }
+        RetargetDirectoryPaths(vm, oldDir, newDir);
 
         await SaveAsync(vm, newDir, cancellationToken).ConfigureAwait(false);
         return newDir;
@@ -210,11 +189,26 @@ public sealed class VmConfigurationStore
         var portableCopy = JsonSerializer.Deserialize<VirtualMachine>(
             JsonSerializer.Serialize(vm, JsonOptions), JsonOptions)!;
 
+        var seedPath = vm.Integration.UnattendedInstall.GeneratedSeedMediaPath;
+        var seedFull = string.IsNullOrWhiteSpace(seedPath)
+            ? null
+            : Path.GetFullPath(Path.IsPathRooted(seedPath) ? seedPath : Path.Combine(vmDir, seedPath));
+
+        // Never export generated unattended seed media containing credentials (§37, §58)
+        portableCopy.Integration.UnattendedInstall.GeneratedSeedMediaPath = null;
+        portableCopy.Integration.UnattendedInstall.Enabled = false;
+        portableCopy.Storage.RemoveAll(d =>
+            !string.IsNullOrWhiteSpace(d.Path) &&
+            ((seedFull is not null && string.Equals(
+                Path.GetFullPath(Path.IsPathRooted(d.Path) ? d.Path : Path.Combine(vmDir, d.Path)),
+                seedFull,
+                StringComparison.OrdinalIgnoreCase)) ||
+             string.Equals(Path.GetFileName(d.Path), "express-seed.iso", StringComparison.OrdinalIgnoreCase)));
+
         // Strip host-specific absolute paths inside the VM directory into portable relative paths (§47)
         foreach (var disk in portableCopy.Storage)
         {
-            if (!string.IsNullOrWhiteSpace(disk.Path) &&
-                Path.GetFullPath(disk.Path).StartsWith(vmDir, StringComparison.OrdinalIgnoreCase))
+            if (!string.IsNullOrWhiteSpace(disk.Path) && IsUnderDirectory(vmDir, disk.Path))
             {
                 disk.Path = Path.GetRelativePath(vmDir, Path.GetFullPath(disk.Path)).Replace('\\', '/');
             }
@@ -222,7 +216,7 @@ public sealed class VmConfigurationStore
         }
 
         if (!string.IsNullOrWhiteSpace(portableCopy.Firmware.VarsFilePath) &&
-            Path.GetFullPath(portableCopy.Firmware.VarsFilePath).StartsWith(vmDir, StringComparison.OrdinalIgnoreCase))
+            IsUnderDirectory(vmDir, portableCopy.Firmware.VarsFilePath))
         {
             portableCopy.Firmware.VarsFilePath = Path.GetRelativePath(vmDir, Path.GetFullPath(portableCopy.Firmware.VarsFilePath)).Replace('\\', '/');
         }
@@ -249,7 +243,13 @@ public sealed class VmConfigurationStore
         foreach (var file in Directory.EnumerateFiles(vmDir, "*", SearchOption.AllDirectories))
         {
             var fileName = Path.GetFileName(file);
-            if (string.Equals(fileName, VmDirectoryLayout.ConfigFileName, StringComparison.OrdinalIgnoreCase) ||
+            if (seedFull is not null && string.Equals(Path.GetFullPath(file), seedFull, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (string.Equals(fileName, "express-seed.iso", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(fileName, VmDirectoryLayout.ConfigFileName, StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(fileName, VmDirectoryLayout.LockFileName, StringComparison.OrdinalIgnoreCase))
             {
                 continue;
@@ -266,7 +266,8 @@ public sealed class VmConfigurationStore
     public async Task<VirtualMachine> ImportPortablePackageAsync(
         string qvmFilePath,
         string targetLibraryDirectory,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool allowExternalHostPathsAndRawArgs = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(qvmFilePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(targetLibraryDirectory);
@@ -306,6 +307,8 @@ public sealed class VmConfigurationStore
             }
 
             var vm = await LoadAsync(tempExtractDir, cancellationToken).ConfigureAwait(false);
+            ValidateImportedVmConfiguration(vm, tempExtractDir, allowExternalHostPathsAndRawArgs);
+
             vm.Identity.Id = Guid.NewGuid().ToString("D");
             vm.Metadata.CreatedAtUtc = DateTimeOffset.UtcNow;
             vm.Metadata.UpdatedAtUtc = DateTimeOffset.UtcNow;
@@ -318,7 +321,7 @@ public sealed class VmConfigurationStore
             }
 
             Directory.Move(tempExtractDir, finalDir);
-            RebaseRelativePaths(vm, finalDir);
+            RetargetDirectoryPaths(vm, tempExtractDir, finalDir);
             await SaveAsync(vm, finalDir, cancellationToken).ConfigureAwait(false);
             return vm;
         }
@@ -374,13 +377,126 @@ public sealed class VmConfigurationStore
         return reserved.Contains(name, StringComparer.OrdinalIgnoreCase);
     }
 
+    public static bool IsUnderDirectory(string root, string path)
+    {
+        if (string.IsNullOrWhiteSpace(root) || string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+
+        var normalizedRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            + Path.DirectorySeparatorChar;
+        var normalizedPath = Path.GetFullPath(path);
+        return normalizedPath.StartsWith(normalizedRoot, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string? RetargetPathIfUnderDirectory(string? path, string oldDir, string newDir)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !IsUnderDirectory(oldDir, path))
+        {
+            return path;
+        }
+
+        var relative = Path.GetRelativePath(Path.GetFullPath(oldDir), Path.GetFullPath(path));
+        return Path.GetFullPath(Path.Combine(newDir, relative));
+    }
+
+    private static void RetargetDirectoryPaths(VirtualMachine vm, string oldDir, string newDir)
+    {
+        foreach (var disk in vm.Storage)
+        {
+            disk.Path = RetargetPathIfUnderDirectory(disk.Path, oldDir, newDir) ?? string.Empty;
+            disk.ParentBackingFilePath = RetargetPathIfUnderDirectory(disk.ParentBackingFilePath, oldDir, newDir);
+        }
+
+        vm.Firmware.VarsFilePath = RetargetPathIfUnderDirectory(vm.Firmware.VarsFilePath, oldDir, newDir);
+        vm.Firmware.CustomCodePath = RetargetPathIfUnderDirectory(vm.Firmware.CustomCodePath, oldDir, newDir);
+        vm.Firmware.CustomVarsTemplatePath = RetargetPathIfUnderDirectory(vm.Firmware.CustomVarsTemplatePath, oldDir, newDir);
+        vm.Metadata.LastScreenshotPath = RetargetPathIfUnderDirectory(vm.Metadata.LastScreenshotPath, oldDir, newDir);
+        vm.Integration.UnattendedInstall.GeneratedSeedMediaPath =
+            RetargetPathIfUnderDirectory(vm.Integration.UnattendedInstall.GeneratedSeedMediaPath, oldDir, newDir);
+        vm.Boot.DirectKernelPath = RetargetPathIfUnderDirectory(vm.Boot.DirectKernelPath, oldDir, newDir);
+        vm.Boot.InitrdPath = RetargetPathIfUnderDirectory(vm.Boot.InitrdPath, oldDir, newDir);
+        vm.DirectoryPath = Path.GetFullPath(newDir);
+    }
+
+    private static void ValidateImportedVmConfiguration(
+        VirtualMachine vm,
+        string extractDir,
+        bool allowExternalHostPathsAndRawArgs)
+    {
+        if (allowExternalHostPathsAndRawArgs)
+        {
+            return;
+        }
+
+        foreach (var disk in vm.Storage)
+        {
+            if (!string.IsNullOrWhiteSpace(disk.Path) && !IsUnderDirectory(extractDir, disk.Path))
+            {
+                throw new SecurityException($"Imported VM configuration references an external disk path '{disk.Path}' without explicit user approval (§58).");
+            }
+
+            if (!string.IsNullOrWhiteSpace(disk.ParentBackingFilePath) && !IsUnderDirectory(extractDir, disk.ParentBackingFilePath))
+            {
+                throw new SecurityException($"Imported VM configuration references an external backing disk path '{disk.ParentBackingFilePath}' without explicit user approval (§58).");
+            }
+        }
+
+        string?[] sensitivePaths =
+        [
+            vm.Firmware.VarsFilePath,
+            vm.Firmware.CustomCodePath,
+            vm.Firmware.CustomVarsTemplatePath,
+            vm.Boot.DirectKernelPath,
+            vm.Boot.InitrdPath,
+            vm.Integration.UnattendedInstall.GeneratedSeedMediaPath
+        ];
+
+        foreach (var p in sensitivePaths)
+        {
+            if (!string.IsNullOrWhiteSpace(p) && !IsUnderDirectory(extractDir, p))
+            {
+                throw new SecurityException($"Imported VM configuration references an external host path '{p}' without explicit user approval (§58).");
+            }
+        }
+
+        if (vm.AdvancedQemuArgs.Count > 0)
+        {
+            throw new SecurityException("Imported VM configuration contains raw QEMU arguments which require explicit user approval before import (§58).");
+        }
+
+        // Strip any residual host-specific optional references outside the package directory
+        if (!string.IsNullOrWhiteSpace(vm.GuestProfile.InstallerIsoPath) && !IsUnderDirectory(extractDir, vm.GuestProfile.InstallerIsoPath))
+        {
+            vm.GuestProfile.InstallerIsoPath = null;
+        }
+        if (!string.IsNullOrWhiteSpace(vm.Integration.VirtioWinDriverIsoPath) && !IsUnderDirectory(extractDir, vm.Integration.VirtioWinDriverIsoPath))
+        {
+            vm.Integration.VirtioWinDriverIsoPath = null;
+        }
+        if (!string.IsNullOrWhiteSpace(vm.SharedServices.HostFolderPath) && !IsUnderDirectory(extractDir, vm.SharedServices.HostFolderPath))
+        {
+            vm.SharedServices.HostFolderPath = null;
+        }
+        if (!string.IsNullOrWhiteSpace(vm.Metadata.LastScreenshotPath) && !IsUnderDirectory(extractDir, vm.Metadata.LastScreenshotPath))
+        {
+            vm.Metadata.LastScreenshotPath = null;
+        }
+    }
+
     private static void RebaseRelativePaths(VirtualMachine vm, string vmDir)
     {
         foreach (var disk in vm.Storage)
         {
             if (!string.IsNullOrWhiteSpace(disk.Path) && !Path.IsPathRooted(disk.Path))
             {
-                disk.Path = Path.GetFullPath(Path.Combine(vmDir, disk.Path));
+                var resolved = Path.GetFullPath(Path.Combine(vmDir, disk.Path));
+                if (!IsUnderDirectory(vmDir, resolved))
+                {
+                    throw new SecurityException($"Relative disk path '{disk.Path}' escapes the VM directory (§58).");
+                }
+                disk.Path = resolved;
             }
             else if (!string.IsNullOrWhiteSpace(disk.Path) && !File.Exists(disk.Path))
             {
@@ -394,7 +510,12 @@ public sealed class VmConfigurationStore
 
         if (!string.IsNullOrWhiteSpace(vm.Firmware.VarsFilePath) && !Path.IsPathRooted(vm.Firmware.VarsFilePath))
         {
-            vm.Firmware.VarsFilePath = Path.GetFullPath(Path.Combine(vmDir, vm.Firmware.VarsFilePath));
+            var resolvedVars = Path.GetFullPath(Path.Combine(vmDir, vm.Firmware.VarsFilePath));
+            if (!IsUnderDirectory(vmDir, resolvedVars))
+            {
+                throw new SecurityException($"Relative firmware vars path '{vm.Firmware.VarsFilePath}' escapes the VM directory (§58).");
+            }
+            vm.Firmware.VarsFilePath = resolvedVars;
         }
         else if (!string.IsNullOrWhiteSpace(vm.Firmware.VarsFilePath) && !File.Exists(vm.Firmware.VarsFilePath))
         {

@@ -118,6 +118,8 @@ public sealed class CoreAndQemuUnitTests
         Assert.Equal("whpx", spec.ActiveAccelerator);
         Assert.DoesNotContain(spec.ArgumentList, a => a.Contains("hax", StringComparison.OrdinalIgnoreCase));
         Assert.Contains("whpx,kernel-irqchip=off", spec.ArgumentList);
+        Assert.Contains("q35,acpi=on,smm=on", spec.ArgumentList);
+        Assert.Contains("driver=cfi.pflash01,property=secure,value=on", spec.ArgumentList);
         Assert.Contains("127.0.0.1:15", spec.ArgumentList); // VNC display 15 (5915 - 5900)
         Assert.Contains("tcp:127.0.0.1:44100,server=on,wait=off", spec.ArgumentList);
         Assert.Contains("tpm-crb,tpmdev=tpm0", spec.ArgumentList);
@@ -151,7 +153,10 @@ public sealed class CoreAndQemuUnitTests
 
         Assert.Equal(expectedArch, vm.Architecture);
         Assert.Equal(expectedAccelWhenHostWhpxReady, spec.ActiveAccelerator);
-        Assert.Contains(spec.ArgumentList, a => a.StartsWith(expectedMachine, StringComparison.Ordinal));
+        var args = spec.ArgumentList.ToList();
+        var machineIdx = args.IndexOf("-machine");
+        Assert.True(machineIdx >= 0 && machineIdx + 1 < args.Count);
+        Assert.Equal(expectedMachine, args[machineIdx + 1].Split(',')[0]);
     }
 
     [Fact]
@@ -308,10 +313,24 @@ public sealed class CoreAndQemuUnitTests
         Assert.Throws<InvalidOperationException>(() =>
             SecurityValidator.ValidateSafeChildPath(@"C:\VMs\MyVm", @"..\..\Windows\System32\cmd.exe"));
 
-        var redacted = LogRotator.RedactSecrets("Connecting with password=SuperSecret123! and token:abc987xyz");
+        var redacted = LogRotator.RedactSecrets(
+            "Connecting with password=\"SuperSecret123!\" and \"token\": \"abc987xyz\" and Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig");
         Assert.DoesNotContain("SuperSecret123!", redacted);
         Assert.DoesNotContain("abc987xyz", redacted);
+        Assert.DoesNotContain("eyJhbGciOiJIUzI1NiJ9", redacted);
         Assert.Contains("[REDACTED]", redacted);
+
+        var opts = new UnattendedInstallConfig { Enabled = true, Username = "alice", Hostname = "test-vm" };
+        var (_, cloudInit) = UnattendedInstallGenerator.GenerateCloudInitFiles(opts, "MyPass123!");
+        Assert.DoesNotContain("MyPass123!", cloudInit);
+        Assert.Contains("passwd: '$6$", cloudInit);
+
+        var winXml = UnattendedInstallGenerator.GenerateWindowsAutounattendXml(opts, "MyPass123!");
+        Assert.DoesNotContain("MyPass123!", winXml);
+        Assert.Contains("<PlainText>false</PlainText>", winXml);
+
+        Assert.Throws<ArgumentException>(() =>
+            UnattendedInstallGenerator.GenerateCloudInitFiles(opts, "bad\npassword"));
     }
 
     [Fact]

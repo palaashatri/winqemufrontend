@@ -10,7 +10,7 @@
 ## 2. Principle of Least Privilege (§57)
 
 - `WinQemu.App.exe` runs **unelevated** (`asInvoker` in `src/App/app.manifest`).
-- Enabling Windows Hypervisor Platform (`Microsoft-HypervisorPlatform`) is isolated to an explicit user-triggered `dism.exe /Online /Enable-Feature /FeatureName:Microsoft-HypervisorPlatform /All /NoRestart` UAC elevation request (`WhpxDetector.CreateElevatedEnableWhpxProcessStartInfo()`).
+- Enabling Windows Hypervisor Platform (`HypervisorPlatform`) is isolated to an explicit user-triggered `dism.exe /Online /Enable-Feature /FeatureName:HypervisorPlatform /All /NoRestart` UAC elevation request (`WhpxDetector.CreateElevatedEnableWhpxProcessStartInfo()`).
 
 ## 3. Portable Package (`.qvm`) & Input Sanitization (§58, §59)
 

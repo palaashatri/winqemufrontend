@@ -11,7 +11,8 @@ public sealed record QemuRuntimeEndpoints(
     int? VncPort,
     int? SerialPort,
     int? GuestAgentPort,
-    int? TpmEmulatorPort);
+    int? TpmEmulatorPort,
+    string? TpmSocketPath = null);
 
 public sealed record QemuFirmwareResolution(
     string? CodeFilePath,
@@ -34,7 +35,8 @@ public static class QemuCommandBuilder
         QemuTargetCapabilities? capabilities,
         bool isWhpxWorking,
         QemuRuntimeEndpoints endpoints,
-        QemuFirmwareResolution? firmware = null)
+        QemuFirmwareResolution? firmware = null,
+        VmAcceleratorMode? acceleratorOverride = null)
     {
         ArgumentNullException.ThrowIfNull(vm);
         ArgumentException.ThrowIfNullOrWhiteSpace(executablePath);
@@ -53,14 +55,19 @@ public static class QemuCommandBuilder
         }
 
         // 2. Machine & Accelerator (§7, §11, §12) — NEVER HAXM
-        var activeAccel = ResolveAccelerator(vm, capabilities, isWhpxWorking);
+        var activeAccel = ResolveAccelerator(vm, capabilities, isWhpxWorking, acceleratorOverride);
         var machineType = ResolveMachineType(vm, capabilities);
+        var requiresSmm = RequiresSmmForSecureBoot(vm, firmware);
 
         args.Add("-machine");
         var machineSpec = new StringBuilder(machineType);
         if (vm.Architecture is VmArchitecture.X86_64 or VmArchitecture.I386)
         {
             machineSpec.Append(vm.Machine.EnableAcpi ? ",acpi=on" : ",acpi=off");
+            if (requiresSmm)
+            {
+                machineSpec.Append(",smm=on");
+            }
         }
         args.Add(machineSpec.ToString());
 
@@ -96,7 +103,13 @@ public static class QemuCommandBuilder
             : Math.Max(1, vm.Cpu.VcpuCount);
         var sockets = Math.Max(1, vm.Cpu.Sockets);
         var threads = Math.Max(1, vm.Cpu.Threads);
-        var cores = Math.Max(1, vcpus / (sockets * threads));
+        if (vcpus % (sockets * threads) != 0)
+        {
+            // Fall back to a flat topology that always matches the CPU count.
+            sockets = 1;
+            threads = 1;
+        }
+        var cores = vcpus / (sockets * threads);
         args.Add($"cpus={vcpus},sockets={sockets},cores={cores},threads={threads}");
 
         // 4. Memory (§16, §17)
@@ -123,6 +136,11 @@ public static class QemuCommandBuilder
         {
             if (firmware.UsePflash)
             {
+                if (requiresSmm)
+                {
+                    args.Add("-global");
+                    args.Add("driver=cfi.pflash01,property=secure,value=on");
+                }
                 args.Add("-drive");
                 args.Add($"if=pflash,format=raw,unit=0,file={EscapeQemuCommaValue(firmware.CodeFilePath)},readonly=on");
                 if (!string.IsNullOrWhiteSpace(firmware.WritableVarsFilePath))
@@ -139,10 +157,17 @@ public static class QemuCommandBuilder
         }
 
         // 7. TPM 2.0 (§24)
-        if (vm.Security.EnableTpm2 && endpoints.TpmEmulatorPort is > 0)
+        if (vm.Security.EnableTpm2 && (!string.IsNullOrWhiteSpace(endpoints.TpmSocketPath) || endpoints.TpmEmulatorPort is > 0))
         {
             args.Add("-chardev");
-            args.Add($"socket,id=chrtpm,host=127.0.0.1,port={endpoints.TpmEmulatorPort.Value}");
+            if (!string.IsNullOrWhiteSpace(endpoints.TpmSocketPath))
+            {
+                args.Add($"socket,id=chrtpm,path={EscapeQemuCommaValue(endpoints.TpmSocketPath)}");
+            }
+            else
+            {
+                args.Add($"socket,id=chrtpm,host=127.0.0.1,port={endpoints.TpmEmulatorPort!.Value}");
+            }
             args.Add("-tpmdev");
             args.Add("emulator,id=tpm0,chardev=chrtpm");
             args.Add("-device");
@@ -368,18 +393,38 @@ public static class QemuCommandBuilder
         return warnings;
     }
 
+    private static bool RequiresSmmForSecureBoot(VirtualMachine vm, QemuFirmwareResolution? firmware)
+    {
+        if (vm.Architecture is not (VmArchitecture.X86_64 or VmArchitecture.I386))
+        {
+            return false;
+        }
+
+        if (firmware is not { UsePflash: true } || string.IsNullOrWhiteSpace(firmware.CodeFilePath))
+        {
+            return false;
+        }
+
+        var fileName = Path.GetFileName(firmware.CodeFilePath);
+        return (vm.Firmware.EnableSecureBoot || vm.Security.EnableSecureBoot) &&
+               (fileName.Contains("secure", StringComparison.OrdinalIgnoreCase) ||
+                fileName.Contains("secboot", StringComparison.OrdinalIgnoreCase));
+    }
+
     private static string ResolveAccelerator(
         VirtualMachine vm,
         QemuTargetCapabilities? capabilities,
-        bool isWhpxWorking)
+        bool isWhpxWorking,
+        VmAcceleratorMode? acceleratorOverride = null)
     {
         if (!vm.Architecture.SupportsWhpxOnX64Host())
         {
             return "tcg";
         }
 
+        var effectiveMode = acceleratorOverride ?? vm.Accelerator;
         var qemuSupportsWhpx = capabilities is null || capabilities.SupportsAccelerator("whpx");
-        return vm.Accelerator switch
+        return effectiveMode switch
         {
             VmAcceleratorMode.Whpx when isWhpxWorking && qemuSupportsWhpx => "whpx",
             VmAcceleratorMode.Auto when isWhpxWorking && qemuSupportsWhpx => "whpx",

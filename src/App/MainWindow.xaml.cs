@@ -37,10 +37,12 @@ public sealed partial class MainWindow : Window
     private RfbVncClient? _embeddedVncClient;
     private WriteableBitmap? _embeddedBitmap;
     private ManagedVmSession? _activeConsoleSession;
+    private CancellationTokenSource? _attachCts;
     private DispatcherTimer? _metricsTimer;
     private byte _embeddedPointerMask;
     private bool _isFullscreen;
     private bool _allowCloseConfirmed;
+    private bool _suppressConsoleSelectorAttach;
 
     public MainWindow()
     {
@@ -53,10 +55,20 @@ public sealed partial class MainWindow : Window
         WizardPresetCombo.SelectedIndex = 2; // Ubuntu default
 
         AppWindow.Closing += OnAppWindowClosing;
+        Activated += OnWindowActivated;
         _ = InitializeUiAsync();
     }
 
     public MainViewModel ViewModel => _viewModel;
+
+    public void ReportUnhandledUiError(string message)
+    {
+        DispatcherQueue?.TryEnqueue(() =>
+        {
+            var remediation = ErrorTranslator.Translate(message);
+            GlobalStatusText.Text = $"{remediation.Title}: {remediation.UserFriendlyExplanation}";
+        });
+    }
 
     private void TryConfigureWindows11BackdropAndTitleBar()
     {
@@ -108,7 +120,7 @@ public sealed partial class MainWindow : Window
         try
         {
             await _viewModel.InitializeAsync();
-            if (_viewModel.AllVms.Count == 0)
+            if (!string.IsNullOrWhiteSpace(qaOutDir) && _viewModel.AllVms.Count == 0)
             {
                 await _viewModel.ProvisionMultiArchShowcaseVmsAsync();
             }
@@ -314,9 +326,15 @@ public sealed partial class MainWindow : Window
         _viewModel.SelectedVm = card;
         if (card.IsRunningOrPaused)
         {
-            ConsoleVmSelector.SelectedItem = card;
             SwitchActiveView(ConsoleViewPanel);
-            await AttachEmbeddedConsoleToCardAsync(card);
+            if (!ReferenceEquals(ConsoleVmSelector.SelectedItem, card))
+            {
+                ConsoleVmSelector.SelectedItem = card;
+            }
+            else
+            {
+                await AttachEmbeddedConsoleToCardAsync(card);
+            }
         }
         else
         {
@@ -329,7 +347,15 @@ public sealed partial class MainWindow : Window
         try
         {
             GlobalStatusText.Text = $"Starting '{card.Name}' ({card.ArchitectureBadge})...";
-            ConsoleVmSelector.SelectedItem = card;
+            _suppressConsoleSelectorAttach = true;
+            try
+            {
+                ConsoleVmSelector.SelectedItem = card;
+            }
+            finally
+            {
+                _suppressConsoleSelectorAttach = false;
+            }
             SwitchActiveView(ConsoleViewPanel);
             EmbeddedDisplayOverlay.Visibility = Visibility.Visible;
             EmbeddedOverlayTitle.Text = $"Booting {card.Name}...";
@@ -368,6 +394,17 @@ public sealed partial class MainWindow : Window
 
     private async Task AttachEmbeddedConsoleToSessionAsync(VmCardItem card, ManagedVmSession session)
     {
+        _attachCts?.Cancel();
+        _attachCts?.Dispose();
+        var cts = new CancellationTokenSource();
+        _attachCts = cts;
+        var ct = cts.Token;
+
+        if (_activeConsoleSession is not null)
+        {
+            _activeConsoleSession.SerialOutputReceived -= OnSessionSerialOutputReceived;
+        }
+
         _activeConsoleSession = session;
         UpdateConsoleToolbarForSelectedVm(card);
 
@@ -387,11 +424,31 @@ public sealed partial class MainWindow : Window
         if (session.LaunchSpec.Endpoints.VncPort is > 0)
         {
             var vnc = new RfbVncClient();
-            _embeddedVncClient = vnc;
-            vnc.FrameUpdated += OnEmbeddedVncFrameUpdated;
-            await vnc.ConnectLocalhostAsync(session.LaunchSpec.Endpoints.VncPort.Value);
-            EmbeddedDisplayOverlay.Visibility = Visibility.Collapsed;
-            ConsoleFooterLeftText.Text = $"VNC Connected (127.0.0.1:{session.LaunchSpec.Endpoints.VncPort.Value}) · QMP Connected (127.0.0.1:{session.LaunchSpec.Endpoints.QmpPort})";
+            try
+            {
+                vnc.FrameUpdated += OnEmbeddedVncFrameUpdated;
+                await vnc.ConnectLocalhostAsync(session.LaunchSpec.Endpoints.VncPort.Value, cancellationToken: ct);
+                if (ct.IsCancellationRequested)
+                {
+                    await vnc.DisposeAsync();
+                    return;
+                }
+
+                _embeddedVncClient = vnc;
+                EmbeddedDisplayOverlay.Visibility = Visibility.Collapsed;
+                ConsoleFooterLeftText.Text = $"VNC Connected (127.0.0.1:{session.LaunchSpec.Endpoints.VncPort.Value}) · QMP Connected (127.0.0.1:{session.LaunchSpec.Endpoints.QmpPort})";
+            }
+            catch (OperationCanceledException)
+            {
+                await vnc.DisposeAsync();
+            }
+            catch (Exception ex)
+            {
+                await vnc.DisposeAsync();
+                EmbeddedDisplayOverlay.Visibility = Visibility.Visible;
+                EmbeddedOverlayTitle.Text = "Display Connection Error";
+                EmbeddedOverlaySubtitle.Text = $"Could not connect to localhost VNC on port {session.LaunchSpec.Endpoints.VncPort.Value}: {ex.Message}";
+            }
         }
     }
 
@@ -447,6 +504,11 @@ public sealed partial class MainWindow : Window
 
     private async void OnConsoleVmSelectorChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (_suppressConsoleSelectorAttach)
+        {
+            return;
+        }
+
         if (ConsoleVmSelector.SelectedItem is VmCardItem card)
         {
             _viewModel.SelectedVm = card;
@@ -566,6 +628,10 @@ public sealed partial class MainWindow : Window
             try { await session.Qmp.EjectMediaAsync(cdrom.Id, force: true); } catch { }
         }
         cdrom.Path = string.Empty;
+        if (!string.IsNullOrWhiteSpace(card.Vm.DirectoryPath))
+        {
+            await _viewModel.VmStore.SaveAsync(card.Vm, card.Vm.DirectoryPath);
+        }
         UpdateConsoleToolbarForSelectedVm(card);
         GlobalStatusText.Text = $"Ejected CD/DVD media from '{card.Name}'.";
     }
@@ -671,6 +737,32 @@ public sealed partial class MainWindow : Window
         await _embeddedVncClient.SendKeyEventAsync(keysym, isDown: false);
     }
 
+    private async void OnConsoleLostFocus(object sender, RoutedEventArgs e)
+    {
+        if (_embeddedVncClient is null) return;
+        try
+        {
+            await _embeddedVncClient.ReleaseAllPressedKeysAsync();
+        }
+        catch
+        {
+        }
+    }
+
+    private async void OnWindowActivated(object sender, WindowActivatedEventArgs args)
+    {
+        if (args.WindowActivationState == WindowActivationState.Deactivated && _embeddedVncClient is not null)
+        {
+            try
+            {
+                await _embeddedVncClient.ReleaseAllPressedKeysAsync();
+            }
+            catch
+            {
+            }
+        }
+    }
+
     private async void OnEmbeddedViewportPointerPressed(object sender, PointerRoutedEventArgs e)
     {
         ConsoleViewPanel.Focus(FocusState.Programmatic);
@@ -720,9 +812,15 @@ public sealed partial class MainWindow : Window
     {
         if ((sender as FrameworkElement)?.Tag is not VmCardItem card) return;
         _viewModel.SelectedVm = card;
-        ConsoleVmSelector.SelectedItem = card;
         SwitchActiveView(ConsoleViewPanel);
-        await AttachEmbeddedConsoleToCardAsync(card);
+        if (!ReferenceEquals(ConsoleVmSelector.SelectedItem, card))
+        {
+            ConsoleVmSelector.SelectedItem = card;
+        }
+        else
+        {
+            await AttachEmbeddedConsoleToCardAsync(card);
+        }
     }
 
     private void OnCardDetachWindowClick(object sender, RoutedEventArgs e)
@@ -823,6 +921,24 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        if (Content?.XamlRoot is not null)
+        {
+            var confirmDialog = new ContentDialog
+            {
+                XamlRoot = Content.XamlRoot,
+                Title = $"Delete '{card.Name}'?",
+                Content = $"This permanently removes '{card.Name}' and all virtual disks and snapshots stored in '{card.Vm.DirectoryPath}'.",
+                PrimaryButtonText = "Delete VM",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Close
+            };
+            var confirm = await confirmDialog.ShowAsync();
+            if (confirm != ContentDialogResult.Primary)
+            {
+                return;
+            }
+        }
+
         var session = _viewModel.ProcessManager.GetSession(card.Id);
         if (session is not null)
         {
@@ -831,7 +947,15 @@ public sealed partial class MainWindow : Window
 
         if (!string.IsNullOrWhiteSpace(card.Vm.DirectoryPath) && Directory.Exists(card.Vm.DirectoryPath))
         {
-            try { Directory.Delete(card.Vm.DirectoryPath, recursive: true); } catch { }
+            try
+            {
+                Directory.Delete(card.Vm.DirectoryPath, recursive: true);
+            }
+            catch (Exception ex)
+            {
+                GlobalStatusText.Text = $"Failed to delete VM directory '{card.Vm.DirectoryPath}': {ex.Message}";
+                return;
+            }
         }
 
         _viewModel.AllVms.Remove(card);
@@ -989,7 +1113,7 @@ public sealed partial class MainWindow : Window
         HwSerialConsoleCheck.IsChecked = vm.Developer.EnableSerialConsole;
         HwGdbStubCheck.IsChecked = vm.Developer.EnableGdbStub;
         HwPauseAtStartCheck.IsChecked = vm.Boot.PauseAtStartup;
-        HwRawArgsBox.Text = string.Join(" ", vm.AdvancedQemuArgs);
+        HwRawArgsBox.Text = FormatCommandLineArguments(vm.AdvancedQemuArgs);
 
         RefreshPortForwardSummary(vm);
         RefreshGeneratedCommandPreview(vm);
@@ -1091,9 +1215,7 @@ public sealed partial class MainWindow : Window
         vm.Developer.EnableGdbStub = HwGdbStubCheck.IsChecked == true;
         vm.Boot.PauseAtStartup = HwPauseAtStartCheck.IsChecked == true;
 
-        vm.AdvancedQemuArgs = (HwRawArgsBox.Text ?? string.Empty)
-            .Split(' ', StringSplitOptions.RemoveEmptyEntries)
-            .ToList();
+        vm.AdvancedQemuArgs = ParseCommandLineArguments(HwRawArgsBox.Text);
 
         if (!string.IsNullOrWhiteSpace(vm.DirectoryPath))
         {
@@ -1103,6 +1225,73 @@ public sealed partial class MainWindow : Window
         card.RefreshStaticSummaries();
         RefreshGeneratedCommandPreview(vm);
         GlobalStatusText.Text = $"Saved hardware configuration for '{card.Name}'.";
+    }
+
+    private static string FormatCommandLineArguments(IReadOnlyList<string> args)
+    {
+        return string.Join(" ", args.Select(a =>
+            a.Any(char.IsWhiteSpace) || a.Contains('"')
+                ? $"\"{a.Replace("\"", "\\\"")}\""
+                : a));
+    }
+
+    private static List<string> ParseCommandLineArguments(string? input)
+    {
+        var results = new List<string>();
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            return results;
+        }
+
+        var current = new StringBuilder();
+        var inQuotes = false;
+        char quoteChar = '\0';
+
+        for (var i = 0; i < input.Length; i++)
+        {
+            var c = input[i];
+            if (c == '\\' && i + 1 < input.Length && (input[i + 1] == '"' || input[i + 1] == '\''))
+            {
+                current.Append(input[++i]);
+                continue;
+            }
+
+            if (inQuotes)
+            {
+                if (c == quoteChar)
+                {
+                    inQuotes = false;
+                }
+                else
+                {
+                    current.Append(c);
+                }
+            }
+            else if (c is '"' or '\'')
+            {
+                inQuotes = true;
+                quoteChar = c;
+            }
+            else if (char.IsWhiteSpace(c))
+            {
+                if (current.Length > 0)
+                {
+                    results.Add(current.ToString());
+                    current.Clear();
+                }
+            }
+            else
+            {
+                current.Append(c);
+            }
+        }
+
+        if (current.Length > 0)
+        {
+            results.Add(current.ToString());
+        }
+
+        return results;
     }
 
     private void OnCopyGeneratedCommandClick(object sender, RoutedEventArgs e)
@@ -1180,7 +1369,8 @@ public sealed partial class MainWindow : Window
             if (latest is null) return;
 
             var activeSession = _viewModel.ProcessManager.GetSession(card.Id);
-            await _viewModel.SnapshotManager.RestoreSnapshotAsync(card.Vm, latest.Id, qemuImg, activeSession);
+            var allVms = _viewModel.AllVms.Select(c => c.Vm).ToList();
+            await _viewModel.SnapshotManager.RestoreSnapshotAsync(card.Vm, latest.Id, qemuImg, activeSession, allVms: allVms);
             await RefreshSnapshotsAndCloneViewAsync(card);
             GlobalStatusText.Text = $"Restored snapshot '{latest.DisplayName}' on '{card.Name}'.";
         }
@@ -1201,7 +1391,8 @@ public sealed partial class MainWindow : Window
             if (latest is null) return;
 
             var activeSession = _viewModel.ProcessManager.GetSession(card.Id);
-            await _viewModel.SnapshotManager.DeleteSnapshotAsync(card.Vm, latest.Id, qemuImg, activeSession);
+            var allVms = _viewModel.AllVms.Select(c => c.Vm).ToList();
+            await _viewModel.SnapshotManager.DeleteSnapshotAsync(card.Vm, latest.Id, qemuImg, activeSession, allVms: allVms);
             await RefreshSnapshotsAndCloneViewAsync(card);
             GlobalStatusText.Text = $"Deleted snapshot '{latest.DisplayName}'.";
         }
@@ -1304,10 +1495,43 @@ public sealed partial class MainWindow : Window
 
     private async void OnSaveSettingsClick(object sender, RoutedEventArgs e)
     {
-        if (!string.IsNullOrWhiteSpace(SettingsStorageDirBox.Text))
+        var previousStorageDir = _viewModel.Settings.VmStorageDirectory;
+        var newStorageDir = string.IsNullOrWhiteSpace(SettingsStorageDirBox.Text)
+            ? previousStorageDir
+            : SettingsStorageDirBox.Text.Trim();
+
+        if (!string.Equals(
+                Path.GetFullPath(previousStorageDir),
+                Path.GetFullPath(newStorageDir),
+                StringComparison.OrdinalIgnoreCase))
         {
-            _viewModel.Settings.VmStorageDirectory = SettingsStorageDirBox.Text.Trim();
+            if (_viewModel.ProcessManager.ActiveSessions.Any(s => s.StateMachine.IsActiveProcessState))
+            {
+                GlobalStatusText.Text = "Stop running VMs before relocating the default VM storage directory (§46).";
+                return;
+            }
+
+            Directory.CreateDirectory(newStorageDir);
+            foreach (var card in _viewModel.AllVms.ToList())
+            {
+                if (!string.IsNullOrWhiteSpace(card.Vm.DirectoryPath) && Directory.Exists(card.Vm.DirectoryPath))
+                {
+                    try
+                    {
+                        await _viewModel.VmStore.MoveVmDirectoryAsync(card.Vm, newStorageDir);
+                    }
+                    catch (Exception ex)
+                    {
+                        GlobalStatusText.Text = $"Failed to move '{card.Name}' to '{newStorageDir}': {ex.Message}";
+                        return;
+                    }
+                }
+            }
+
+            _viewModel.Settings.VmStorageDirectory = newStorageDir;
+            await _viewModel.ReloadVmLibraryAsync();
         }
+
         _viewModel.Settings.Theme = ThemeSelectorCombo.SelectedIndex switch
         {
             1 => AppThemePreference.Light,
@@ -1316,6 +1540,7 @@ public sealed partial class MainWindow : Window
         };
         _viewModel.Settings.CloseRunningVmPolicy = (RunningVmClosePolicy)Math.Clamp(ClosePolicyCombo.SelectedIndex, 0, 3);
         await _viewModel.SettingsStore.SaveAsync(_viewModel.Settings);
+        PopulateSettingsAndDiagnosticsView();
         GlobalStatusText.Text = "Saved application settings.";
     }
 
@@ -1325,6 +1550,37 @@ public sealed partial class MainWindow : Window
         RefreshTopStatusBanners();
         PopulateSettingsAndDiagnosticsView();
         GlobalStatusText.Text = "Re-probed QEMU runtime and WHPX acceleration capabilities.";
+    }
+
+    private async void OnInstallManagedQemuClick(object sender, RoutedEventArgs e)
+    {
+        InstallManagedQemuBtn.IsEnabled = false;
+        try
+        {
+            var progress = new Progress<(double Percent, string Status)>(p =>
+            {
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    GlobalStatusText.Text = $"Managed QEMU Installer: {p.Status} ({p.Percent:0.0}%)";
+                    SettingsRuntimeSummaryText.Text = $"{p.Status} ({p.Percent:0.0}%)";
+                });
+            });
+
+            var rt = await _viewModel.InstallManagedQemuRuntimeAsync(progress);
+            RefreshTopStatusBanners();
+            PopulateSettingsAndDiagnosticsView();
+            GlobalStatusText.Text = rt.IsAvailable
+                ? $"Installed managed QEMU runtime ({rt.VersionString}) to {rt.DirectoryPath}."
+                : $"Managed QEMU download finished; verify binaries in {rt.DirectoryPath}.";
+        }
+        catch (Exception ex)
+        {
+            GlobalStatusText.Text = $"Managed QEMU installation failed: {ex.Message}";
+        }
+        finally
+        {
+            InstallManagedQemuBtn.IsEnabled = true;
+        }
     }
 
     private void OnEnableWhpxClick(object sender, RoutedEventArgs e)
@@ -1373,7 +1629,33 @@ public sealed partial class MainWindow : Window
                 "vm",
                 null,
                 false);
-            File.Copy(file.Path, card.Vm.Storage[0].Path, overwrite: true);
+            var diskDevice = card.Vm.Storage[0];
+            if (_viewModel.RuntimeInfo.QemuImgPath is not null && File.Exists(_viewModel.RuntimeInfo.QemuImgPath))
+            {
+                var qemuImg = new QemuImgClient(_viewModel.RuntimeInfo.QemuImgPath);
+                await qemuImg.ConvertAsync(file.Path, diskDevice.Path, "qcow2");
+                diskDevice.Format = "qcow2";
+                var info = await qemuImg.InspectAsync(diskDevice.Path);
+                if (info.VirtualSizeBytes > 0)
+                {
+                    diskDevice.VirtualSizeBytes = info.VirtualSizeBytes;
+                }
+            }
+            else
+            {
+                var ext = Path.GetExtension(file.Path).TrimStart('.').ToLowerInvariant();
+                var targetPath = Path.ChangeExtension(diskDevice.Path, string.IsNullOrEmpty(ext) ? "img" : ext);
+                File.Copy(file.Path, targetPath, overwrite: true);
+                diskDevice.Path = targetPath;
+                diskDevice.Format = string.IsNullOrEmpty(ext) ? "raw" : ext;
+                diskDevice.VirtualSizeBytes = new FileInfo(targetPath).Length;
+            }
+
+            if (!string.IsNullOrWhiteSpace(card.Vm.DirectoryPath))
+            {
+                await _viewModel.VmStore.SaveAsync(card.Vm, card.Vm.DirectoryPath);
+            }
+            card.RefreshStaticSummaries();
             GlobalStatusText.Text = $"Imported disk image '{file.Name}' into new VM '{card.Name}'.";
         }
     }
@@ -1391,8 +1673,10 @@ public sealed partial class MainWindow : Window
 
     private async void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
     {
-        var runningCount = _viewModel.ProcessManager.ActiveSessions.Count(s => s.StateMachine.IsActiveProcessState);
-        if (runningCount == 0 || _allowCloseConfirmed)
+        var runningSessions = _viewModel.ProcessManager.ActiveSessions
+            .Where(s => s.StateMachine.IsActiveProcessState)
+            .ToList();
+        if (runningSessions.Count == 0 || _allowCloseConfirmed)
         {
             return;
         }
@@ -1403,6 +1687,18 @@ public sealed partial class MainWindow : Window
 
         if (policy == RunningVmClosePolicy.KeepRunning)
         {
+            foreach (var s in runningSessions)
+            {
+                s.PreserveLockFileForKeepRunningOnExit();
+            }
+            _allowCloseConfirmed = true;
+            Close();
+            return;
+        }
+
+        if (policy == RunningVmClosePolicy.GracefulShutdown)
+        {
+            await GracefullyStopRunningSessionsWithTimeoutAsync(runningSessions, TimeSpan.FromSeconds(8));
             _allowCloseConfirmed = true;
             Close();
             return;
@@ -1410,7 +1706,7 @@ public sealed partial class MainWindow : Window
 
         if (policy == RunningVmClosePolicy.ForceStop)
         {
-            foreach (var s in _viewModel.ProcessManager.ActiveSessions)
+            foreach (var s in runningSessions)
             {
                 await s.ForceStopAsync();
             }
@@ -1422,28 +1718,63 @@ public sealed partial class MainWindow : Window
         var dialog = new ContentDialog
         {
             XamlRoot = Content.XamlRoot,
-            Title = $"{runningCount} virtual machine(s) are still running.",
-            Content = "Choose whether to keep running VMs active in the background or shut them down before exiting.",
-            PrimaryButtonText = "Force Stop All & Exit",
+            Title = $"{runningSessions.Count} virtual machine(s) are still running.",
+            Content = "Choose whether to shut down running VMs gracefully, keep them running in the background, or cancel closing.",
+            PrimaryButtonText = "Shut Down & Exit",
             SecondaryButtonText = "Keep Running & Exit",
             CloseButtonText = "Cancel",
-            DefaultButton = ContentDialogButton.Secondary
+            DefaultButton = ContentDialogButton.Primary
         };
 
         var result = await dialog.ShowAsync();
         if (result == ContentDialogResult.Primary)
         {
-            foreach (var s in _viewModel.ProcessManager.ActiveSessions)
-            {
-                await s.ForceStopAsync();
-            }
+            await GracefullyStopRunningSessionsWithTimeoutAsync(runningSessions, TimeSpan.FromSeconds(8));
             _allowCloseConfirmed = true;
             Close();
         }
         else if (result == ContentDialogResult.Secondary)
         {
+            foreach (var s in runningSessions)
+            {
+                s.PreserveLockFileForKeepRunningOnExit();
+            }
             _allowCloseConfirmed = true;
             Close();
+        }
+    }
+
+    private static async Task GracefullyStopRunningSessionsWithTimeoutAsync(
+        IReadOnlyList<ManagedVmSession> sessions,
+        TimeSpan timeout)
+    {
+        foreach (var s in sessions)
+        {
+            try
+            {
+                await s.ShutDownGracefullyAsync();
+            }
+            catch
+            {
+            }
+        }
+
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        while (DateTimeOffset.UtcNow < deadline &&
+               sessions.Any(s => s.StateMachine.IsActiveProcessState))
+        {
+            await Task.Delay(200);
+        }
+
+        foreach (var s in sessions.Where(s => s.StateMachine.IsActiveProcessState))
+        {
+            try
+            {
+                await s.ForceStopAsync();
+            }
+            catch
+            {
+            }
         }
     }
 
@@ -1550,13 +1881,31 @@ public sealed partial class MainWindow : Window
     private async Task BootAndCaptureAllShowcaseVmsAsync(string outputDir)
     {
         Directory.CreateDirectory(outputDir);
-        var cards = _viewModel.AllVms.ToList();
+        var cards = _viewModel.AllVms
+            .Where(c => c.Vm.Identity.Tags.Contains("showcase-boot-test", StringComparer.OrdinalIgnoreCase))
+            .ToList();
+        if (cards.Count == 0)
+        {
+            await _viewModel.ProvisionMultiArchShowcaseVmsAsync();
+            cards = _viewModel.AllVms
+                .Where(c => c.Vm.Identity.Tags.Contains("showcase-boot-test", StringComparer.OrdinalIgnoreCase))
+                .ToList();
+        }
+
         var index = 9;
 
         foreach (var card in cards)
         {
+            var wasAlreadyRunning = card.IsRunningOrPaused;
             ShowcaseProgressText.Text = $"Booting {card.Name} ({card.ArchitectureBadge})...";
-            await StartVmAndOpenConsoleAsync(card);
+            if (!wasAlreadyRunning)
+            {
+                await StartVmAndOpenConsoleAsync(card);
+            }
+            else
+            {
+                await AttachEmbeddedConsoleToCardAsync(card);
+            }
 
             // Wait for firmware + bootloader/OS to render onto the VNC framebuffer
             if (card.Vm.Architecture is VmArchitecture.Aarch64 or VmArchitecture.Riscv64)
@@ -1580,10 +1929,7 @@ public sealed partial class MainWindow : Window
                 await Task.Delay(3000);
                 if (_embeddedVncClient is not null)
                 {
-                    await _embeddedVncClient.SendAsciiTextAsync(
-                        ".\" === Mac OS X / Darwin PowerPC 64 (PowerMac G5 970fx / mac99) ===\" cr\n" +
-                        ".\" Kernel: Darwin 9.8.0 PowerPC 970fx - SYSTEM BOOT COMPLETE\" cr\n" +
-                        "dev /cpus/PowerPC,970fx .properties\n");
+                    await _embeddedVncClient.SendAsciiTextAsync("dev /cpus/PowerPC,970fx .properties\n");
                 }
                 await Task.Delay(1800);
             }
@@ -1625,13 +1971,16 @@ public sealed partial class MainWindow : Window
             var appWindowShotPath = Path.Combine(outputDir, $"{index:00}-app-window-{slug}.png");
             CaptureWindowScreenshot(appWindowShotPath);
 
-            // Stop VM cleanly before moving to the next architecture
-            var session = _viewModel.ProcessManager.GetSession(card.Id);
-            if (session is not null)
+            // Stop only VMs started by this capture run before moving to the next architecture
+            if (!wasAlreadyRunning)
             {
-                await session.ForceStopAsync();
-                card.State = VmState.Stopped;
-                RefreshTopStatusBanners();
+                var session = _viewModel.ProcessManager.GetSession(card.Id);
+                if (session is not null)
+                {
+                    await session.ForceStopAsync();
+                    card.State = VmState.Stopped;
+                    RefreshTopStatusBanners();
+                }
             }
 
             index++;
@@ -1651,48 +2000,69 @@ public sealed partial class MainWindow : Window
             var width = Math.Max(1, rect.Right - rect.Left);
             var height = Math.Max(1, rect.Bottom - rect.Top);
 
-            var screenDc = GetDC(IntPtr.Zero);
-            var memDc = CreateCompatibleDC(screenDc);
+            var screenDc = IntPtr.Zero;
+            var memDc = IntPtr.Zero;
+            var hBitmap = IntPtr.Zero;
+            var oldObj = IntPtr.Zero;
 
-            var bmi = new BITMAPINFOHEADER
+            try
             {
-                biSize = (uint)Marshal.SizeOf<BITMAPINFOHEADER>(),
-                biWidth = width,
-                biHeight = -height, // top-down DIB
-                biPlanes = 1,
-                biBitCount = 32,
-                biCompression = 0 // BI_RGB
-            };
+                screenDc = GetDC(IntPtr.Zero);
+                memDc = CreateCompatibleDC(screenDc);
 
-            var hBitmap = CreateDIBSection(memDc, ref bmi, 0, out var bitsPtr, IntPtr.Zero, 0);
-            if (hBitmap != IntPtr.Zero && bitsPtr != IntPtr.Zero)
-            {
-                var oldObj = SelectObject(memDc, hBitmap);
-
-                // PW_RENDERFULLCONTENT (2) captures DirectComposition / WinUI 3 surfaces accurately
-                var ok = PrintWindow(hwnd, memDc, 2);
-                if (!ok)
+                var bmi = new BITMAPINFOHEADER
                 {
-                    BitBlt(memDc, 0, 0, width, height, screenDc, rect.Left, rect.Top, 0x00CC0020 /* SRCCOPY */);
-                }
+                    biSize = (uint)Marshal.SizeOf<BITMAPINFOHEADER>(),
+                    biWidth = width,
+                    biHeight = -height, // top-down DIB
+                    biPlanes = 1,
+                    biBitCount = 32,
+                    biCompression = 0 // BI_RGB
+                };
 
-                var byteLen = width * height * 4;
-                var pixels = new byte[byteLen];
-                Marshal.Copy(bitsPtr, pixels, 0, byteLen);
-                // Ensure opaque alpha on any GDI surface pixels where alpha was left 0
-                for (var i = 3; i < byteLen; i += 4)
+                hBitmap = CreateDIBSection(memDc, ref bmi, 0, out var bitsPtr, IntPtr.Zero, 0);
+                if (hBitmap != IntPtr.Zero && bitsPtr != IntPtr.Zero)
                 {
-                    pixels[i] = 255;
+                    oldObj = SelectObject(memDc, hBitmap);
+
+                    // PW_RENDERFULLCONTENT (2) captures DirectComposition / WinUI 3 surfaces accurately
+                    var ok = PrintWindow(hwnd, memDc, 2);
+                    if (!ok)
+                    {
+                        BitBlt(memDc, 0, 0, width, height, screenDc, rect.Left, rect.Top, 0x00CC0020 /* SRCCOPY */);
+                    }
+
+                    var byteLen = width * height * 4;
+                    var pixels = new byte[byteLen];
+                    Marshal.Copy(bitsPtr, pixels, 0, byteLen);
+                    // Ensure opaque alpha on any GDI surface pixels where alpha was left 0
+                    for (var i = 3; i < byteLen; i += 4)
+                    {
+                        pixels[i] = 255;
+                    }
+
+                    FastFramebufferPresenter.SaveBgraAsPng(filePath, pixels, width, height);
                 }
-
-                SelectObject(memDc, oldObj);
-                DeleteObject(hBitmap);
-
-                FastFramebufferPresenter.SaveBgraAsPng(filePath, pixels, width, height);
             }
-
-            DeleteDC(memDc);
-            ReleaseDC(IntPtr.Zero, screenDc);
+            finally
+            {
+                if (oldObj != IntPtr.Zero && memDc != IntPtr.Zero)
+                {
+                    SelectObject(memDc, oldObj);
+                }
+                if (hBitmap != IntPtr.Zero)
+                {
+                    DeleteObject(hBitmap);
+                }
+                if (memDc != IntPtr.Zero)
+                {
+                    DeleteDC(memDc);
+                }
+                if (screenDc != IntPtr.Zero)
+                {
+                    ReleaseDC(IntPtr.Zero, screenDc);
+                }
+            }
         }
         catch
         {

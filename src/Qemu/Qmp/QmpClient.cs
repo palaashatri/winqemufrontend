@@ -380,14 +380,12 @@ public sealed class QmpClient : IAsyncDisposable
             commandName = trimmed;
         }
 
-        string[] destructiveCommands =
-        [
-            "quit", "system_powerdown", "system_reset", "blockdev-del",
-            "drive_del", "device_del", "human-monitor-command", "x-oob-test"
-        ];
+        var isReadOnly = commandName.StartsWith("query-", StringComparison.OrdinalIgnoreCase) ||
+                         string.Equals(commandName, "qom-list", StringComparison.OrdinalIgnoreCase) ||
+                         string.Equals(commandName, "qom-get", StringComparison.OrdinalIgnoreCase) ||
+                         string.Equals(commandName, "qom-list-types", StringComparison.OrdinalIgnoreCase);
 
-        if (!allowDestructiveRawMode &&
-            destructiveCommands.Contains(commandName, StringComparer.OrdinalIgnoreCase))
+        if (!allowDestructiveRawMode && !isReadOnly)
         {
             throw new InvalidOperationException(
                 $"Command '{commandName}' is potentially destructive. Enable 'Allow destructive raw QMP commands' in Developer Mode to run it (§53).");
