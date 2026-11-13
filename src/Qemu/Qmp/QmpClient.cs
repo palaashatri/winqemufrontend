@@ -86,11 +86,24 @@ public sealed class QmpClient : IAsyncDisposable
                 client.Dispose();
                 throw;
             }
+            catch (OperationCanceledException ex) when (timeoutCts.IsCancellationRequested)
+            {
+                client.Dispose();
+                lastError = ex;
+                break;
+            }
             catch (Exception ex)
             {
                 client.Dispose();
                 lastError = ex;
-                await Task.Delay(75, cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    await Task.Delay(75, timeoutCts.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    break;
+                }
             }
         }
 

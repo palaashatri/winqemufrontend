@@ -133,7 +133,7 @@ public sealed class CoreAndQemuUnitTests
     [InlineData("generic-aarch64", VmArchitecture.Aarch64, "virt", "tcg")]
     [InlineData("generic-riscv64", VmArchitecture.Riscv64, "virt", "tcg")]
     [InlineData("macos-ppc64", VmArchitecture.Ppc64, "mac99", "tcg")]
-    [InlineData("generic-i386", VmArchitecture.I386, "pc", "whpx")]
+    [InlineData("generic-i386", VmArchitecture.I386, "pc", "tcg")]
     public void CommandBuilder_SupportsMultiArchitecturePresetsCorrectly(
         string presetId,
         VmArchitecture expectedArch,
@@ -409,5 +409,187 @@ public sealed class CoreAndQemuUnitTests
                 File.Delete(pngPath);
             }
         }
+    }
+
+    [Fact]
+    public void CommandBuilder_ResolvesWhpxAndTcgFromCapabilitiesAndArchitecture()
+    {
+        var endpoints = new QemuRuntimeEndpoints(45010, 5921, 45011, null, null);
+
+        // 1. X86_64 with capabilities: null and isWhpxWorking: true -> whpx,kernel-irqchip=off
+        var x64Preset = GuestPresetCatalog.GetByIdOrDefault("ubuntu-desktop");
+        var x64Vm = GuestPresetCatalog.CreateVmFromPreset(x64Preset, "Ubuntu x64", @"C:\VMs\UbuX64");
+        var x64Spec = QemuCommandBuilder.Build(
+            x64Vm,
+            @"C:\qemu\qemu-system-x86_64.exe",
+            capabilities: null,
+            isWhpxWorking: true,
+            endpoints: endpoints);
+
+        Assert.Equal("whpx", x64Spec.ActiveAccelerator);
+        var x64Args = x64Spec.ArgumentList.ToList();
+        var x64AccelIdx = x64Args.IndexOf("-accel");
+        Assert.True(x64AccelIdx >= 0 && x64AccelIdx + 1 < x64Args.Count);
+        Assert.Equal("whpx,kernel-irqchip=off", x64Args[x64AccelIdx + 1]);
+
+        // 2. X86_64 with capabilities listing tcg only -> tcg
+        var tcgOnlyCaps = new QemuTargetCapabilities
+        {
+            Architecture = VmArchitecture.X86_64,
+            Accelerators = ["tcg"]
+        };
+        var x64TcgSpec = QemuCommandBuilder.Build(
+            x64Vm,
+            @"C:\qemu\qemu-system-x86_64.exe",
+            capabilities: tcgOnlyCaps,
+            isWhpxWorking: true,
+            endpoints: endpoints);
+        Assert.Equal("tcg", x64TcgSpec.ActiveAccelerator);
+
+        // 3. I386 with capabilities: null -> tcg
+        var i386Preset = GuestPresetCatalog.GetByIdOrDefault("generic-i386");
+        var i386Vm = GuestPresetCatalog.CreateVmFromPreset(i386Preset, "Legacy i386", @"C:\VMs\I386");
+        var i386NullCapsSpec = QemuCommandBuilder.Build(
+            i386Vm,
+            @"C:\qemu\qemu-system-i386.exe",
+            capabilities: null,
+            isWhpxWorking: true,
+            endpoints: endpoints);
+        Assert.Equal("tcg", i386NullCapsSpec.ActiveAccelerator);
+
+        // 4. I386 with capabilities listing tcg only -> tcg
+        var i386TcgCaps = new QemuTargetCapabilities
+        {
+            Architecture = VmArchitecture.I386,
+            Accelerators = ["tcg"]
+        };
+        var i386TcgSpec = QemuCommandBuilder.Build(
+            i386Vm,
+            @"C:\qemu\qemu-system-i386.exe",
+            capabilities: i386TcgCaps,
+            isWhpxWorking: true,
+            endpoints: endpoints);
+        Assert.Equal("tcg", i386TcgSpec.ActiveAccelerator);
+
+        // 5. I386 with capabilities explicitly listing whpx -> whpx,kernel-irqchip=off
+        var i386WhpxCaps = new QemuTargetCapabilities
+        {
+            Architecture = VmArchitecture.I386,
+            Accelerators = ["tcg", "whpx"]
+        };
+        var i386WhpxSpec = QemuCommandBuilder.Build(
+            i386Vm,
+            @"C:\qemu\qemu-system-i386.exe",
+            capabilities: i386WhpxCaps,
+            isWhpxWorking: true,
+            endpoints: endpoints);
+        Assert.Equal("whpx", i386WhpxSpec.ActiveAccelerator);
+        Assert.Contains("whpx,kernel-irqchip=off", i386WhpxSpec.ArgumentList);
+    }
+
+    [Fact]
+    public void CommandBuilder_ValidatesCustomArgsAndNormalizesWildcardBindsAndQ35Ahci()
+    {
+        var warnings = QemuCommandBuilder.ValidateCustomArguments(["-accel=haxm", "-vnc", "[::]:0"]);
+        Assert.Equal(2, warnings.Count);
+        Assert.Contains(warnings, w => w.Contains("HAXM", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(warnings, w => w.Contains("wildcard", StringComparison.OrdinalIgnoreCase));
+
+        var vm = GuestPresetCatalog.CreateVmFromPreset(
+            GuestPresetCatalog.GetByIdOrDefault("windows-11"),
+            "Q35 Test",
+            @"C:\VMs\Q35");
+        vm.Machine.MachineType = string.Empty; // Forces ResolveMachineType -> "q35"
+        vm.Storage =
+        [
+            new VmStorageDevice { Id = "disk0", Media = "disk", Bus = "sata", Format = "qcow2", Path = @"C:\VMs\Q35\disk.qcow2" }
+        ];
+        vm.Network[0].PortForwards.Add(new PortForwardRule
+        {
+            Name = "SSH",
+            Protocol = "tcp",
+            HostBindAddress = "::",
+            HostPort = 2222,
+            GuestPort = 22,
+            Enabled = true
+        });
+
+        var spec = QemuCommandBuilder.Build(
+            vm,
+            @"C:\qemu\qemu-system-x86_64.exe",
+            capabilities: null,
+            isWhpxWorking: true,
+            endpoints: new QemuRuntimeEndpoints(45020, 5922, null, null, null));
+
+        Assert.Contains(spec.ArgumentList, a => a.Contains("ide-hd,drive=disk0,id=dev-disk0,bus=ide.0", StringComparison.Ordinal));
+        Assert.Contains(spec.ArgumentList, a => a.Contains("hostfwd=tcp:127.0.0.1:2222-:22", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void MultiArchBootImageFactory_EmbedsCustomAndDefaultHypervisorDescriptions()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"winqemu-bootfactory-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var rawDefaultPath = Path.Combine(tempDir, "default.raw");
+            MultiArchBootImageFactory.CreateBootableHybridDiskImage(
+                rawDefaultPath,
+                "Test OS",
+                "1.0",
+                "x86_64",
+                "boot>");
+            var defaultRawText = Encoding.ASCII.GetString(File.ReadAllBytes(rawDefaultPath));
+            Assert.Contains("Hypervisor   : QEMU / WinQEMU Frontend Native Runtime", defaultRawText, StringComparison.Ordinal);
+
+            var rawWhpxPath = Path.Combine(tempDir, "whpx.raw");
+            const string whpxDesc = "Windows Hypervisor Platform (WHPX Hardware Accelerated)";
+            MultiArchBootImageFactory.CreateBootableHybridDiskImage(
+                rawWhpxPath,
+                "Test OS",
+                "1.0",
+                "x86_64",
+                "boot>",
+                0x1F,
+                whpxDesc);
+            var whpxRawBytes = File.ReadAllBytes(rawWhpxPath);
+            var sectorBannerText = Encoding.ASCII.GetString(whpxRawBytes, 512, 1024);
+            Assert.Contains($"Hypervisor   : {whpxDesc}", sectorBannerText, StringComparison.Ordinal);
+
+            var isoTcgPath = Path.Combine(tempDir, "tcg.iso");
+            const string tcgDesc = "QEMU TCG Dynamic Binary Translation (Multi-Arch Emulation)";
+            MultiArchBootImageFactory.CreateBootableElToritoIso(
+                isoTcgPath,
+                "WINQEMU_TEST",
+                "Test OS",
+                "1.0",
+                "aarch64",
+                "boot>",
+                0x1F,
+                tcgDesc);
+            var isoText = Encoding.ASCII.GetString(File.ReadAllBytes(isoTcgPath));
+            Assert.Contains($"Hypervisor   : {tcgDesc}", isoText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                Directory.Delete(tempDir, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void AuditFixes_VmStateMachineShortIdsAndErrorTranslator_HandleEdgeCases()
+    {
+        var sm = new VmStateMachine("vm-test");
+        sm.TransitionTo(VmState.Starting, "boot");
+        Assert.Equal(VmState.Suspended, sm.MapQmpRunState("suspended"));
+        Assert.Equal(VmState.Paused, sm.MapQmpRunState("Paused"));
+
+        Assert.Equal("VM-ab12", VmConfigurationStore.SanitizeFolderName(string.Empty, "ab12"));
+
+        var remediation = ErrorTranslator.Translate("whpx: initialization error: hypervisor feature not present");
+        Assert.Equal(ErrorRecoveryActionKind.EnableWhpxElevated, remediation.PrimaryAction);
     }
 }

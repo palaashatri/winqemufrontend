@@ -93,11 +93,24 @@ public sealed class RfbVncClient : IAsyncDisposable
                 client.Dispose();
                 throw;
             }
+            catch (OperationCanceledException ex) when (timeoutCts.IsCancellationRequested)
+            {
+                client.Dispose();
+                lastError = ex;
+                break;
+            }
             catch (Exception ex)
             {
                 client.Dispose();
                 lastError = ex;
-                await Task.Delay(80, cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    await Task.Delay(80, timeoutCts.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    break;
+                }
             }
         }
 
@@ -403,10 +416,14 @@ public sealed class RfbVncClient : IAsyncDisposable
         await ReadExactAsync(stream, serverInitBuf, cancellationToken).ConfigureAwait(false);
         var width = BinaryPrimitives.ReadUInt16BigEndian(serverInitBuf.AsSpan(0, 2));
         var height = BinaryPrimitives.ReadUInt16BigEndian(serverInitBuf.AsSpan(2, 2));
-        var nameLen = BinaryPrimitives.ReadInt32BigEndian(serverInitBuf.AsSpan(20, 4));
+        var nameLen = BinaryPrimitives.ReadUInt32BigEndian(serverInitBuf.AsSpan(20, 4));
+        if (nameLen > 1024 * 1024)
+        {
+            throw new InvalidDataException($"VNC ServerInit desktop name length ({nameLen} bytes) exceeds safety limit.");
+        }
         if (nameLen > 4096)
         {
-            await DrainBytesAsync(stream, (uint)nameLen, cancellationToken).ConfigureAwait(false);
+            await DrainBytesAsync(stream, nameLen, cancellationToken).ConfigureAwait(false);
         }
         else if (nameLen > 0)
         {
@@ -415,11 +432,17 @@ public sealed class RfbVncClient : IAsyncDisposable
             ServerDesktopName = Encoding.UTF8.GetString(nameBytes);
         }
 
+        var initialFbBytes = (long)width * height * 4;
+        if (initialFbBytes is <= 0 or > 256L * 1024 * 1024)
+        {
+            throw new InvalidDataException($"VNC framebuffer dimensions ({width}x{height}) exceed safety limit.");
+        }
+
         lock (_fbLock)
         {
             FramebufferWidth = width;
             FramebufferHeight = height;
-            _framebuffer = new byte[width * height * 4];
+            _framebuffer = new byte[initialFbBytes];
         }
 
         // 5. Send SetPixelFormat (32bpp BGRA8 little-endian)
@@ -481,10 +504,14 @@ public sealed class RfbVncClient : IAsyncDisposable
                     case 3: // ServerCutText (§32)
                         var cutHdr = new byte[7];
                         await ReadExactAsync(_stream, cutHdr, cancellationToken).ConfigureAwait(false);
-                        var cutLen = BinaryPrimitives.ReadInt32BigEndian(cutHdr.AsSpan(3, 4));
+                        var cutLen = BinaryPrimitives.ReadUInt32BigEndian(cutHdr.AsSpan(3, 4));
+                        if (cutLen > 16 * 1024 * 1024)
+                        {
+                            throw new InvalidDataException($"VNC ServerCutText length ({cutLen} bytes) exceeds safety limit.");
+                        }
                         if (cutLen > 1024 * 1024)
                         {
-                            await DrainBytesAsync(_stream, (uint)cutLen, cancellationToken).ConfigureAwait(false);
+                            await DrainBytesAsync(_stream, cutLen, cancellationToken).ConfigureAwait(false);
                         }
                         else if (cutLen > 0)
                         {
@@ -530,13 +557,18 @@ public sealed class RfbVncClient : IAsyncDisposable
 
             if (encoding == EncodingDesktopSize)
             {
+                var resizedBytes = (long)rw * rh * 4;
+                if (resizedBytes is <= 0 or > 256L * 1024 * 1024)
+                {
+                    throw new InvalidDataException($"VNC DesktopSize ({rw}x{rh}) exceeds safety limit.");
+                }
                 lock (_fbLock)
                 {
-                    if (rw > 0 && rh > 0 && (rw != FramebufferWidth || rh != FramebufferHeight))
+                    if (rw != FramebufferWidth || rh != FramebufferHeight)
                     {
                         FramebufferWidth = rw;
                         FramebufferHeight = rh;
-                        _framebuffer = new byte[rw * rh * 4];
+                        _framebuffer = new byte[resizedBytes];
                     }
                 }
                 dirtyRects.Add(new DirtyRect(0, 0, FramebufferWidth, FramebufferHeight));
@@ -545,9 +577,14 @@ public sealed class RfbVncClient : IAsyncDisposable
 
             if (encoding == EncodingCursor)
             {
-                var pixelBytesCount = rw * rh * 4;
-                var maskBytesCount = ((rw + 7) / 8) * rh;
-                var cursorBuf = new byte[pixelBytesCount + maskBytesCount];
+                var pixelBytesCount = (long)rw * rh * 4;
+                var maskBytesCount = ((long)(rw + 7) / 8) * rh;
+                var totalCursorBytes = pixelBytesCount + maskBytesCount;
+                if (totalCursorBytes > 16L * 1024 * 1024)
+                {
+                    throw new InvalidDataException($"VNC cursor encoding size ({totalCursorBytes} bytes) exceeds safety limit.");
+                }
+                var cursorBuf = new byte[totalCursorBytes];
                 if (cursorBuf.Length > 0)
                 {
                     await ReadExactAsync(stream, cursorBuf, cancellationToken).ConfigureAwait(false);
@@ -572,7 +609,12 @@ public sealed class RfbVncClient : IAsyncDisposable
 
             if (encoding == EncodingRaw)
             {
-                var rectBytes = new byte[rw * rh * 4];
+                var rectByteCount = (long)rw * rh * 4;
+                if (rectByteCount > 256L * 1024 * 1024)
+                {
+                    throw new InvalidDataException($"VNC raw rectangle size ({rectByteCount} bytes) exceeds safety limit.");
+                }
+                var rectBytes = new byte[rectByteCount];
                 await ReadExactAsync(stream, rectBytes, cancellationToken).ConfigureAwait(false);
 
                 // Force alpha channel = 255 so WinUI 3 WriteableBitmap renders opaque pixels

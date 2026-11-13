@@ -35,7 +35,15 @@ public static class ErrorTranslator
         var details = LogRotator.RedactSecrets(rawStderrOrMessage ?? string.Empty).Trim();
         var lower = details.ToLowerInvariant();
 
-        if (lower.Contains("whpx") && (lower.Contains("failed") || lower.Contains("not available") || lower.Contains("no accelerator") || lower.Contains("hr=")))
+        if (lower.Contains("whpx") &&
+            (lower.Contains("failed") ||
+             lower.Contains("not available") ||
+             lower.Contains("not present") ||
+             lower.Contains("not enabled") ||
+             lower.Contains("does not exist") ||
+             lower.Contains("no accelerator") ||
+             lower.Contains("hr=") ||
+             lower.Contains("error")))
         {
             return new ErrorRemediation(
                 Title: "Hardware acceleration could not start.",

@@ -52,10 +52,18 @@ public static partial class WhpxDetector
         var isDllPresent = File.Exists(dllPath);
         var isHypervisorPresent = CheckWinHvHypervisorPresent();
 
-        var isQemuWhpxCompiled = probedAccelerators?.Contains("whpx", StringComparer.OrdinalIgnoreCase) ?? false;
-        if (!isQemuWhpxCompiled && !string.IsNullOrWhiteSpace(qemuSystemX86_64Path) && File.Exists(qemuSystemX86_64Path))
+        bool isQemuWhpxCompiled;
+        if (probedAccelerators is { Count: > 0 })
+        {
+            isQemuWhpxCompiled = probedAccelerators.Contains("whpx", StringComparer.OrdinalIgnoreCase);
+        }
+        else if (!string.IsNullOrWhiteSpace(qemuSystemX86_64Path) && File.Exists(qemuSystemX86_64Path))
         {
             isQemuWhpxCompiled = await CheckQemuSupportsWhpxFlagAsync(qemuSystemX86_64Path, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            isQemuWhpxCompiled = false;
         }
 
         if (!isSupportedHostArch)
@@ -82,8 +90,10 @@ public static partial class WhpxDetector
                 IsQemuWhpxCompiledIn: isQemuWhpxCompiled,
                 DidQemuWhpxSmokeTestPass: false,
                 UserFriendlyTitle: "Hardware acceleration unavailable",
-                Explanation: "Windows Hypervisor Platform is not enabled. Enable it to run same-architecture virtual machines at near-native speed.",
-                CanOfferElevatedEnable: true);
+                Explanation: isDllPresent
+                    ? "Windows Hypervisor Platform is not enabled. Enable it to run same-architecture virtual machines at near-native speed."
+                    : "Windows Hypervisor Platform runtime (WinHvPlatform.dll) is not present on this Windows installation.",
+                CanOfferElevatedEnable: isDllPresent);
         }
 
         if (string.IsNullOrWhiteSpace(qemuSystemX86_64Path) || !File.Exists(qemuSystemX86_64Path))
@@ -166,10 +176,12 @@ public static partial class WhpxDetector
         try
         {
             Marshal.WriteInt64(buffer, 0);
-            var hr = WHvGetCapability(WHvCapabilityCodeHypervisorPresent, buffer, 4, out _);
+            var hr = WHvGetCapability(WHvCapabilityCodeHypervisorPresent, buffer, 4, out var writtenSize);
             if (hr == 0)
             {
-                return Marshal.ReadByte(buffer) != 0;
+                return writtenSize >= 4
+                    ? Marshal.ReadInt32(buffer) != 0
+                    : Marshal.ReadByte(buffer) != 0;
             }
         }
         catch
@@ -204,9 +216,15 @@ public static partial class WhpxDetector
                 return false;
             }
 
-            var output = await proc.StandardOutput.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
+            var stdoutTask = proc.StandardOutput.ReadToEndAsync(cancellationToken);
+            var stderrTask = proc.StandardError.ReadToEndAsync(cancellationToken);
             await proc.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-            return output.Contains("whpx", StringComparison.OrdinalIgnoreCase);
+            var output = await stdoutTask.ConfigureAwait(false);
+            _ = await stderrTask.ConfigureAwait(false);
+
+            return proc.ExitCode == 0 &&
+                   output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+                       .Any(line => string.Equals(line.Trim(), "whpx", StringComparison.OrdinalIgnoreCase));
         }
         catch
         {
@@ -229,7 +247,7 @@ public static partial class WhpxDetector
                 CreateNoWindow = true
             };
             psi.ArgumentList.Add("-accel");
-            psi.ArgumentList.Add("whpx");
+            psi.ArgumentList.Add("whpx,kernel-irqchip=off");
             psi.ArgumentList.Add("-machine");
             psi.ArgumentList.Add("q35");
             psi.ArgumentList.Add("-m");
@@ -245,22 +263,39 @@ public static partial class WhpxDetector
                 return (false, "Could not start QEMU probe process.");
             }
 
+            var stdoutTask = proc.StandardOutput.ReadToEndAsync(CancellationToken.None);
+            var stderrTask = proc.StandardError.ReadToEndAsync(CancellationToken.None);
+
             try
             {
                 using var delayCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 delayCts.CancelAfter(TimeSpan.FromMilliseconds(450));
                 await proc.WaitForExitAsync(delayCts.Token).ConfigureAwait(false);
 
-                // Process exited within 450ms -> likely failed WHPX initialization
-                var stderr = await proc.StandardError.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
-                return (false, string.IsNullOrWhiteSpace(stderr) ? $"Exit code {proc.ExitCode}" : stderr.Trim());
+                // Process exited within 450ms -> WHPX initialization failed
+                var stderr = (await stderrTask.ConfigureAwait(false)).Trim();
+                var stdout = (await stdoutTask.ConfigureAwait(false)).Trim();
+                var detail = !string.IsNullOrWhiteSpace(stderr)
+                    ? (string.IsNullOrWhiteSpace(stdout) ? stderr : $"{stderr} ({stdout})")
+                    : (!string.IsNullOrWhiteSpace(stdout) ? stdout : $"Exit code {proc.ExitCode}");
+                return (false, detail);
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
                 // Still alive in paused (-S) state after 450ms -> WHPX partition initialized cleanly!
                 try { proc.Kill(entireProcessTree: true); } catch { }
-                return (true, "WHPX partition initialized successfully.");
+                try { proc.WaitForExit(1000); } catch { }
+                return (true, "WHPX partition initialized successfully (whpx,kernel-irqchip=off).");
             }
+            catch (OperationCanceledException)
+            {
+                try { proc.Kill(entireProcessTree: true); } catch { }
+                throw;
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {

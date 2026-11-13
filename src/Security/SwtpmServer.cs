@@ -80,8 +80,26 @@ public sealed class SwtpmManager : IAsyncDisposable
         psi.ArgumentList.Add("not-need-init");
 
         _externalSwtpmProcess = Process.Start(psi);
+        if (_externalSwtpmProcess is null)
+        {
+            return null;
+        }
+
+        // Drain redirected stdout/stderr asynchronously to avoid OS pipe buffer deadlocks.
+        _externalSwtpmProcess.OutputDataReceived += (_, _) => { };
+        _externalSwtpmProcess.ErrorDataReceived += (_, _) => { };
+        try { _externalSwtpmProcess.BeginOutputReadLine(); } catch { }
+        try { _externalSwtpmProcess.BeginErrorReadLine(); } catch { }
+
         await Task.Delay(150, cancellationToken).ConfigureAwait(false);
-        return _externalSwtpmProcess is { HasExited: false } ? preferredPort : null;
+        if (_externalSwtpmProcess.HasExited)
+        {
+            _externalSwtpmProcess.Dispose();
+            _externalSwtpmProcess = null;
+            return null;
+        }
+
+        return preferredPort;
     }
 
     public async ValueTask DisposeAsync()

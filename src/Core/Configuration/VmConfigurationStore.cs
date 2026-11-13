@@ -162,11 +162,11 @@ public sealed class VmConfigurationStore
 
         if (Directory.Exists(newDir))
         {
-            newDir = Path.GetFullPath(Path.Combine(targetParentDirectory, $"{folderName}-{vm.Identity.Id[..8]}"));
+            newDir = Path.GetFullPath(Path.Combine(targetParentDirectory, $"{folderName}-{GetShortIdPrefix(vm.Identity.Id)}"));
         }
 
         Directory.CreateDirectory(targetParentDirectory);
-        Directory.Move(oldDir, newDir);
+        MoveDirectorySafe(oldDir, newDir);
 
         RetargetDirectoryPaths(vm, oldDir, newDir);
 
@@ -317,10 +317,10 @@ public sealed class VmConfigurationStore
             var finalDir = Path.Combine(targetLibraryDirectory, finalFolderName);
             if (Directory.Exists(finalDir))
             {
-                finalDir = Path.Combine(targetLibraryDirectory, $"{finalFolderName}-{vm.Identity.Id[..8]}");
+                finalDir = Path.Combine(targetLibraryDirectory, $"{finalFolderName}-{GetShortIdPrefix(vm.Identity.Id)}");
             }
 
-            Directory.Move(tempExtractDir, finalDir);
+            MoveDirectorySafe(tempExtractDir, finalDir);
             RetargetDirectoryPaths(vm, tempExtractDir, finalDir);
             await SaveAsync(vm, finalDir, cancellationToken).ConfigureAwait(false);
             return vm;
@@ -335,11 +335,74 @@ public sealed class VmConfigurationStore
         }
     }
 
+    private static string GetShortIdPrefix(string? id)
+    {
+        if (string.IsNullOrWhiteSpace(id))
+        {
+            return "00000000";
+        }
+
+        var trimmed = id.Trim();
+        return trimmed.Length <= 8 ? trimmed : trimmed[..8];
+    }
+
+    private static void MoveDirectorySafe(string sourceDir, string destinationDir)
+    {
+        var fullSrc = Path.GetFullPath(sourceDir);
+        var fullDst = Path.GetFullPath(destinationDir);
+        if (string.Equals(Path.GetPathRoot(fullSrc), Path.GetPathRoot(fullDst), StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                Directory.Move(fullSrc, fullDst);
+                return;
+            }
+            catch (IOException) when (!Directory.Exists(fullDst))
+            {
+                // Fall back to copy + delete (e.g. reparse points / mount junctions across volumes).
+            }
+        }
+
+        CopyDirectoryRecursive(fullSrc, fullDst);
+        Directory.Delete(fullSrc, recursive: true);
+    }
+
+    private static void CopyDirectoryRecursive(string sourceDir, string destinationDir)
+    {
+        Directory.CreateDirectory(destinationDir);
+        try
+        {
+            foreach (var file in Directory.EnumerateFiles(sourceDir))
+            {
+                File.Copy(file, Path.Combine(destinationDir, Path.GetFileName(file)), overwrite: true);
+            }
+
+            foreach (var subDir in Directory.EnumerateDirectories(sourceDir))
+            {
+                CopyDirectoryRecursive(subDir, Path.Combine(destinationDir, Path.GetFileName(subDir)));
+            }
+        }
+        catch
+        {
+            try
+            {
+                if (Directory.Exists(destinationDir))
+                {
+                    Directory.Delete(destinationDir, recursive: true);
+                }
+            }
+            catch
+            {
+            }
+            throw;
+        }
+    }
+
     public static string SanitizeFolderName(string vmName, string fallbackId)
     {
         if (string.IsNullOrWhiteSpace(vmName))
         {
-            return $"VM-{fallbackId[..8]}";
+            return $"VM-{GetShortIdPrefix(fallbackId)}";
         }
 
         var invalidChars = Path.GetInvalidFileNameChars();

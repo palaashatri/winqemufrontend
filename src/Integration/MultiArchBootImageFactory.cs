@@ -12,18 +12,22 @@ namespace WinQemu.Integration;
 /// </summary>
 public static class MultiArchBootImageFactory
 {
+    private static string ToCleanAscii(string s) =>
+        s.Replace("·", "-").Replace("—", "--").Replace("→", "->");
+
     public static void CreateBootableHybridDiskImage(
         string outputRawDiskPath,
         string osBannerTitle,
         string osVersionSubtitle,
         string kernelAndArchInfo,
         string promptLine,
-        byte vgaColorAttr = 0x1F)
+        byte vgaColorAttr = 0x1F,
+        string? hypervisorDescription = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(outputRawDiskPath);
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outputRawDiskPath))!);
 
-        // Create a valid 4 MiB FAT16 filesystem image whose Volume Boot Record (Sector 0)
+        // Create a valid 8 MiB FAT16 filesystem image whose Volume Boot Record (Sector 0)
         // ALSO contains valid x86 16-bit real-mode boot code (at offset 0x3E) that:
         //   1. Sets 80x25 16-color VGA text mode (int 10h, ax=0003h)
         //   2. Clears the screen with `vgaColorAttr`
@@ -47,9 +51,7 @@ public static class MultiArchBootImageFactory
         var image = new byte[totalSectors * bytesPerSector];
 
         // 1. Build Stage-2 Banner Text in Sector 1 (offset 512)
-        static string ToCleanAscii(string s) =>
-            s.Replace("·", "-").Replace("—", "--").Replace("→", "->");
-
+        var effectiveHypervisor = ToCleanAscii(hypervisorDescription ?? "QEMU / WinQEMU Frontend Native Runtime");
         var bannerLines = new[]
         {
             "==============================================================================",
@@ -58,7 +60,7 @@ public static class MultiArchBootImageFactory
             "==============================================================================",
             "",
             $"  Architecture : {ToCleanAscii(kernelAndArchInfo)}",
-            "  Hypervisor   : QEMU / WinQEMU Frontend Native Runtime",
+            $"  Hypervisor   : {effectiveHypervisor}",
             "  Display      : Localhost VNC Framebuffer + Serial Console (Active)",
             "  Network      : VirtIO / Intel e1000e User-Mode NAT (10.0.2.15/24)",
             "  Status       : SYSTEM BOOT COMPLETE - KERNEL & INIT ACTIVE",
@@ -68,7 +70,12 @@ public static class MultiArchBootImageFactory
 
         var bannerText = string.Join("\r\n", bannerLines) + "\r\n\0";
         var bannerBytes = Encoding.ASCII.GetBytes(bannerText);
-        bannerBytes.AsSpan(0, Math.Min(bannerBytes.Length, 1024)).CopyTo(image.AsSpan(512));
+        var copyLength = Math.Min(bannerBytes.Length, 1024);
+        bannerBytes.AsSpan(0, copyLength).CopyTo(image.AsSpan(512));
+        if (bannerBytes.Length >= 1024)
+        {
+            image[512 + 1023] = 0;
+        }
 
         // 2. Write FAT16 BPB + x86 Boot Code in Sector 0
         var vbr = image.AsSpan(0, bytesPerSector);
@@ -154,7 +161,8 @@ public static class MultiArchBootImageFactory
         string osVersionSubtitle,
         string kernelAndArchInfo,
         string promptLine,
-        byte vgaColorAttr = 0x1F)
+        byte vgaColorAttr = 0x1F,
+        string? hypervisorDescription = null)
     {
         var tempRawPath = Path.Combine(Path.GetTempPath(), $"winqemu-boot-{Guid.NewGuid():N}.raw");
         try
@@ -165,7 +173,8 @@ public static class MultiArchBootImageFactory
                 osVersionSubtitle,
                 kernelAndArchInfo,
                 promptLine,
-                vgaColorAttr);
+                vgaColorAttr,
+                hypervisorDescription);
 
             // Extract first 2048 bytes (Sectors 0..3) as the El Torito no-emulation boot image
             var fullRaw = File.ReadAllBytes(tempRawPath);
@@ -174,8 +183,9 @@ public static class MultiArchBootImageFactory
             // Patch El Torito boot image so SI points directly to offset 0x7E00 (0x7C00 + 512) already loaded in memory!
             PatchBootloaderForMemoryResidentBanner(bootSectorImage, vgaColorAttr);
 
+            var effectiveHypervisor = ToCleanAscii(hypervisorDescription ?? "QEMU / WinQEMU Frontend Native Runtime");
             var nshContent = Encoding.ASCII.GetBytes(
-                $"@echo -off\r\ncls\r\necho \"{osBannerTitle}\"\r\necho \"{osVersionSubtitle}\"\r\necho \"{kernelAndArchInfo}\"\r\necho \"{promptLine}\"\r\n");
+                $"@echo -off\r\ncls\r\necho \"{ToCleanAscii(osBannerTitle)}\"\r\necho \"{ToCleanAscii(osVersionSubtitle)}\"\r\necho \"{ToCleanAscii(kernelAndArchInfo)}\"\r\necho \"  Hypervisor   : {effectiveHypervisor}\"\r\necho \"{ToCleanAscii(promptLine)}\"\r\n");
 
             Iso9660Builder.CreateDataIso(
                 outputIsoPath,

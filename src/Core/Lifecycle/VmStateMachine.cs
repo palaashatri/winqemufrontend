@@ -97,7 +97,7 @@ public sealed class VmStateMachine
         return qmpStatus.Trim().ToLowerInvariant() switch
         {
             "running" => VmState.Running,
-            "paused" or "prelaunch" or "finish-migrate" or "Suspended" => VmState.Paused,
+            "paused" or "prelaunch" or "finish-migrate" => VmState.Paused,
             "suspended" => VmState.Suspended,
             "shutdown" => VmState.ShuttingDown,
             "internal-error" or "io-error" or "guest-panicked" or "watchdog" => VmState.Crashed,

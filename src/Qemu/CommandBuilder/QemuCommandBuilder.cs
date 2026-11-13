@@ -222,7 +222,7 @@ public static class QemuCommandBuilder
         }
 
         // 9. Storage Drives & Removable Media (§20, §34)
-        AppendStorageArguments(args, vm, capabilities);
+        AppendStorageArguments(args, vm, capabilities, machineType);
 
         // 10. Networking & Port Forwarding (§25, §26, §27)
         AppendNetworkArguments(args, vm, capabilities);
@@ -378,16 +378,20 @@ public static class QemuCommandBuilder
         for (var i = 0; i < customArgs.Count; i++)
         {
             var arg = customArgs[i].Trim();
-            if (string.Equals(arg, "-accel", StringComparison.OrdinalIgnoreCase) &&
-                i + 1 < customArgs.Count &&
-                customArgs[i + 1].Contains("hax", StringComparison.OrdinalIgnoreCase))
+            var isInlineHax = arg.StartsWith("-accel=", StringComparison.OrdinalIgnoreCase) &&
+                              arg.Contains("hax", StringComparison.OrdinalIgnoreCase);
+            if (isInlineHax ||
+                (string.Equals(arg, "-accel", StringComparison.OrdinalIgnoreCase) &&
+                 i + 1 < customArgs.Count &&
+                 customArgs[i + 1].Contains("hax", StringComparison.OrdinalIgnoreCase)))
             {
                 warnings.Add("HAXM is discontinued and unsupported (§7). Use WHPX or TCG instead.");
             }
 
-            if (arg.Contains("0.0.0.0", StringComparison.OrdinalIgnoreCase))
+            if (arg.Contains("0.0.0.0", StringComparison.OrdinalIgnoreCase) ||
+                arg.Contains("[::]", StringComparison.OrdinalIgnoreCase))
             {
-                warnings.Add($"Argument '{arg}' binds to 0.0.0.0, which exposes VM services outside localhost (§10, §56).");
+                warnings.Add($"Argument '{arg}' binds to a wildcard interface, which exposes VM services outside localhost (§10, §56).");
             }
         }
         return warnings;
@@ -423,11 +427,13 @@ public static class QemuCommandBuilder
         }
 
         var effectiveMode = acceleratorOverride ?? vm.Accelerator;
-        var qemuSupportsWhpx = capabilities is null || capabilities.SupportsAccelerator("whpx");
+        bool binarySupportsWhpx = capabilities is not null
+            ? capabilities.SupportsAccelerator("whpx")
+            : vm.Architecture == VmArchitecture.X86_64;
         return effectiveMode switch
         {
-            VmAcceleratorMode.Whpx when isWhpxWorking && qemuSupportsWhpx => "whpx",
-            VmAcceleratorMode.Auto when isWhpxWorking && qemuSupportsWhpx => "whpx",
+            VmAcceleratorMode.Whpx when isWhpxWorking && binarySupportsWhpx => "whpx",
+            VmAcceleratorMode.Auto when isWhpxWorking && binarySupportsWhpx => "whpx",
             _ => "tcg"
         };
     }
@@ -491,7 +497,8 @@ public static class QemuCommandBuilder
     private static void AppendStorageArguments(
         List<string> args,
         VirtualMachine vm,
-        QemuTargetCapabilities? capabilities)
+        QemuTargetCapabilities? capabilities,
+        string resolvedMachineType)
     {
         var needsVirtioScsiController = vm.Storage.Any(d =>
             string.Equals(d.Bus, "virtio-scsi", StringComparison.OrdinalIgnoreCase));
@@ -509,7 +516,8 @@ public static class QemuCommandBuilder
         var diskIndex = 0;
         var cdIndex = 0;
         var ahciBusIndex = 0;
-        var isQ35 = string.Equals(vm.Machine.MachineType, "q35", StringComparison.OrdinalIgnoreCase);
+        var isQ35 = resolvedMachineType.Equals("q35", StringComparison.OrdinalIgnoreCase) ||
+                    resolvedMachineType.StartsWith("pc-q35", StringComparison.OrdinalIgnoreCase);
 
         foreach (var dev in vm.Storage)
         {
@@ -662,9 +670,10 @@ public static class QemuCommandBuilder
                 {
                     var proto = string.Equals(rule.Protocol, "udp", StringComparison.OrdinalIgnoreCase) ? "udp" : "tcp";
                     // Bind only to 127.0.0.1 by default for security (§10, §27, §56)
-                    var bindAddr = string.IsNullOrWhiteSpace(rule.HostBindAddress) || rule.HostBindAddress == "0.0.0.0"
+                    var rawBind = rule.HostBindAddress?.Trim();
+                    var bindAddr = string.IsNullOrWhiteSpace(rawBind) || rawBind is "0.0.0.0" or "*" or "::" or "[::]"
                         ? "127.0.0.1"
-                        : rule.HostBindAddress;
+                        : SanitizeArgumentValue(rawBind);
                     netdevSpec.Append($",hostfwd={proto}:{bindAddr}:{rule.HostPort}-:{rule.GuestPort}");
                 }
 
@@ -673,7 +682,7 @@ public static class QemuCommandBuilder
             }
 
             args.Add("-device");
-            var macPart = !string.IsNullOrWhiteSpace(nic.MacAddress) ? $",mac={nic.MacAddress}" : string.Empty;
+            var macPart = !string.IsNullOrWhiteSpace(nic.MacAddress) ? $",mac={SanitizeArgumentValue(nic.MacAddress)}" : string.Empty;
             var romPart = vm.Architecture is VmArchitecture.Aarch64 or VmArchitecture.Riscv64
                 ? ",romfile="
                 : string.Empty;

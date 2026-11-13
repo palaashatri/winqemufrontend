@@ -138,6 +138,14 @@ public sealed class ManagedVmSession : IAsyncDisposable
 
     public string GetRecentLogs(int maxLines = 300) => _logRotator.ReadRecentTail(maxLines);
 
+    internal string CaptureRecentStderr()
+    {
+        lock (_stderrBuffer)
+        {
+            return _stderrBuffer.ToString();
+        }
+    }
+
     public string GetSerialConsoleHistory()
     {
         lock (_serialLock)
@@ -379,8 +387,13 @@ public sealed class ManagedVmSession : IAsyncDisposable
         try
         {
             await Task.Delay(150, cancellationToken).ConfigureAwait(false);
-            var client = new TcpClient();
+            using var client = new TcpClient();
             await client.ConnectAsync(IPAddress.Loopback, port, cancellationToken).ConfigureAwait(false);
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+
             _serialClient = client;
             _serialStream = client.GetStream();
 
@@ -414,6 +427,11 @@ public sealed class ManagedVmSession : IAsyncDisposable
         }
         catch
         {
+        }
+        finally
+        {
+            _serialStream = null;
+            _serialClient = null;
         }
     }
 
@@ -557,9 +575,14 @@ public sealed class QemuProcessManager : IAsyncDisposable
         catch (Exception ex)
         {
             _sessions.TryRemove(vm.Identity.Id, out _);
+            int? exitCode = null;
             try
             {
-                if (!proc.HasExited)
+                if (proc.HasExited)
+                {
+                    exitCode = proc.ExitCode;
+                }
+                else
                 {
                     proc.Kill(entireProcessTree: true);
                 }
@@ -568,7 +591,11 @@ public sealed class QemuProcessManager : IAsyncDisposable
             {
             }
 
-            var remediation = ErrorTranslator.Translate(ex.Message);
+            var capturedStderr = session.CaptureRecentStderr();
+            var failureContext = string.IsNullOrWhiteSpace(capturedStderr)
+                ? ex.Message
+                : $"{capturedStderr}\n{ex.Message}";
+            var remediation = ErrorTranslator.Translate(failureContext, exitCode);
             session.StateMachine.TransitionTo(VmState.Crashed, "Failed during startup/QMP handshake", remediation.UserFriendlyExplanation);
             try { await session.DisposeAsync().ConfigureAwait(false); } catch { }
             throw;
