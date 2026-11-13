@@ -52,9 +52,9 @@ dotnet test tests/WinQemu.Tests.UiAutomation/WinQemu.Tests.UiAutomation.csproj
 # Launch the WinUI 3 application (unpackaged desktop mode)
 dotnet run --project src/App/WinQemu.App.csproj
 
-# Publish standalone self-contained Release binaries locally (win-x64 / win-arm64)
-dotnet publish src/App/WinQemu.App.csproj -c Release -r win-x64 -p:Platform=x64 --self-contained true -o artifacts/win-x64
-dotnet publish src/App/WinQemu.App.csproj -c Release -r win-arm64 -p:Platform=ARM64 --self-contained true -o artifacts/win-arm64
+# Publish standalone self-contained single-file Release binaries locally (win-x64 / win-arm64)
+dotnet publish src/App/WinQemu.App.csproj -c Release -r win-x64 -p:Platform=x64 --self-contained true -p:PublishSingleFile=true -p:DebugType=embedded -o artifacts/win-x64
+dotnet publish src/App/WinQemu.App.csproj -c Release -r win-arm64 -p:Platform=ARM64 --self-contained true -p:PublishSingleFile=true -p:DebugType=embedded -o artifacts/win-arm64
 
 # Run the automated visual & multi-architecture VM boot QA tour
 dotnet run --project src/App/WinQemu.App.csproj -- --qa-tour docs/qa-screenshots

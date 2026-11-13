@@ -102,16 +102,16 @@ dotnet run --project src/App/WinQemu.App.csproj
 # Run the automated visual QA & multi-architecture VM boot verification tour
 dotnet run --project src/App/WinQemu.App.csproj -- --qa-tour docs/qa-screenshots
 
-# Publish standalone self-contained Release binaries locally (win-x64 / win-arm64)
-dotnet publish src/App/WinQemu.App.csproj -c Release -r win-x64 -p:Platform=x64 --self-contained true -o artifacts/win-x64
-dotnet publish src/App/WinQemu.App.csproj -c Release -r win-arm64 -p:Platform=ARM64 --self-contained true -o artifacts/win-arm64
+# Publish standalone self-contained single-file Release binaries locally (win-x64 / win-arm64)
+dotnet publish src/App/WinQemu.App.csproj -c Release -r win-x64 -p:Platform=x64 --self-contained true -p:PublishSingleFile=true -p:DebugType=embedded -o artifacts/win-x64
+dotnet publish src/App/WinQemu.App.csproj -c Release -r win-arm64 -p:Platform=ARM64 --self-contained true -p:PublishSingleFile=true -p:DebugType=embedded -o artifacts/win-arm64
 ```
 
 ### Prebuilt CI & Nightly Binaries (GitHub Actions & GitLab CI)
 
-- **GitHub Actions CI & Nightly Builds** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)): Every push/PR, manual `workflow_dispatch`, and scheduled nightly run (`02:00 UTC`) builds and tests all 4 suites on `windows-latest`, then publishes `WinQemu-win-x64.zip`, `WinQemu-win-arm64.zip`, and `SHA256SUMS.txt` under the **`WinQemu-Windows-Binaries`** workflow artifact (retained 30 days).
+- **GitHub Actions CI & Nightly Builds** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)): Every push/PR, manual `workflow_dispatch`, and scheduled nightly run (`02:00 UTC`) builds and tests all 4 suites on `windows-latest`, then publishes `WinQemu-win-x64.zip`, `WinQemu-win-arm64.zip`, and `SHA256SUMS.txt` under the **`WinQemu-Windows-Binaries`** workflow artifact (retained 30 days). Each ZIP contains only `WinQemu.App.exe`, `README.md`, and `THIRD_PARTY_NOTICES.md`.
 - **GitLab CI Nightly Pipeline** ([`.gitlab-ci.yml`](.gitlab-ci.yml)): Configure a GitLab Windows runner (tagged `windows`) and schedule a recurring pipeline (e.g. `0 2 * * *`) to run `build:windows` -> `test:windows` -> `package:binaries`, producing downloadable `WinQemu-win-x64.zip`, `WinQemu-win-arm64.zip`, and `SHA256SUMS.txt` job artifacts (30-day expiry).
-- **Local Standalone Binaries**: Running the `dotnet publish` command above produces a self-contained folder at `artifacts/win-x64/WinQemu.App.exe` (which includes the Windows App SDK and .NET 10 runtime; download or point to QEMU in **Settings** or use the in-app **Install QEMU** button).
+- **Local Standalone Binaries**: Running the `dotnet publish` command above produces a single self-contained executable `artifacts/win-x64/WinQemu.App.exe` (bundling the Windows App SDK and .NET 10 runtime; download or point to QEMU in **Settings** or use the in-app **Install QEMU** button).
 
 ## Documentation & Specifications
 

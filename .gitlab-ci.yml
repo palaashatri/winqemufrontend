@@ -69,11 +69,11 @@ package:binaries:
   script:
     - |
       New-Item -ItemType Directory -Path "artifacts" -Force | Out-Null
-      dotnet publish src/App/WinQemu.App.csproj -c Release -r win-x64 -p:Platform=x64 --self-contained true -o artifacts/win-x64
+      dotnet publish src/App/WinQemu.App.csproj -c Release -r win-x64 -p:Platform=x64 --self-contained true -p:PublishSingleFile=true -p:DebugType=embedded -o artifacts/win-x64
       Copy-Item THIRD_PARTY_NOTICES.md, README.md artifacts/win-x64/ -Force
       Compress-Archive -Path "artifacts/win-x64/*" -DestinationPath "artifacts/WinQemu-win-x64.zip" -Force
 
-      dotnet publish src/App/WinQemu.App.csproj -c Release -r win-arm64 -p:Platform=ARM64 --self-contained true -o artifacts/win-arm64
+      dotnet publish src/App/WinQemu.App.csproj -c Release -r win-arm64 -p:Platform=ARM64 --self-contained true -p:PublishSingleFile=true -p:DebugType=embedded -o artifacts/win-arm64
       Copy-Item THIRD_PARTY_NOTICES.md, README.md artifacts/win-arm64/ -Force
       Compress-Archive -Path "artifacts/win-arm64/*" -DestinationPath "artifacts/WinQemu-win-arm64.zip" -Force
 
