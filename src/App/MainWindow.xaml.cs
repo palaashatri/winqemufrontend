@@ -120,7 +120,8 @@ public sealed partial class MainWindow : Window
         try
         {
             await _viewModel.InitializeAsync();
-            if (!string.IsNullOrWhiteSpace(qaOutDir) && _viewModel.AllVms.Count == 0)
+            ApplyThemePreference(_viewModel.Settings.Theme);
+            if (!string.IsNullOrWhiteSpace(qaOutDir))
             {
                 await _viewModel.ProvisionMultiArchShowcaseVmsAsync();
             }
@@ -128,6 +129,8 @@ public sealed partial class MainWindow : Window
             RefreshTopStatusBanners();
             PopulateOsDownloadsView();
             PopulateSettingsAndDiagnosticsView();
+            SwitchActiveView(LibraryViewPanel);
+            UpdateResponsiveLayout(MainRootGrid.ActualWidth);
 
             if (_viewModel.FilteredVms.Count > 0)
             {
@@ -165,15 +168,45 @@ public sealed partial class MainWindow : Window
     {
         var rt = _viewModel.RuntimeInfo;
         QemuVersionPillText.Text = rt.IsAvailable
-            ? $"QEMU: {rt.VersionString.Replace("QEMU emulator version ", "")}"
+            ? $"QEMU {rt.VersionString.Replace("QEMU emulator version ", string.Empty).Trim()}"
             : "QEMU: Not Configured";
 
+        var compactTitleBar = MainRootGrid.ActualWidth > 0 && MainRootGrid.ActualWidth < 720;
         var whpx = _viewModel.WhpxReport;
         if (whpx is not null)
         {
-            WhpxStatusPillText.Text = whpx.UserFriendlyTitle;
-            BannerHeadlineText.Text = $"Virtual Machines — {whpx.UserFriendlyTitle}";
-            BannerDetailText.Text = $"{whpx.Explanation} ({rt.TargetBinaries.Count} target architectures discovered: {string.Join(", ", rt.TargetBinaries.Keys)})";
+            var cleanTitle = whpx.UserFriendlyTitle
+                .Replace("✓ ", string.Empty, StringComparison.Ordinal)
+                .Replace("✓", string.Empty, StringComparison.Ordinal)
+                .Trim();
+
+            if (_viewModel.IsWhpxWorking)
+            {
+                WhpxStatusPill.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x23, 0x86, 0x36));
+                WhpxStatusPill.BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x2E, 0xA0, 0x43));
+                WhpxStatusPillIcon.Glyph = "\uE945";
+                WhpxStatusPillText.Text = compactTitleBar ? "WHPX Active" : cleanTitle;
+            }
+            else if (whpx.CanOfferElevatedEnable)
+            {
+                WhpxStatusPill.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x9E, 0x6A, 0x03));
+                WhpxStatusPill.BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0xD2, 0x99, 0x22));
+                WhpxStatusPillIcon.Glyph = "\uE7BA";
+                WhpxStatusPillText.Text = compactTitleBar ? "WHPX Disabled" : cleanTitle;
+            }
+            else
+            {
+                WhpxStatusPill.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x1F, 0x6F, 0xEB));
+                WhpxStatusPill.BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x38, 0x8B, 0xFD));
+                WhpxStatusPillIcon.Glyph = "\uE964";
+                WhpxStatusPillText.Text = compactTitleBar ? "TCG Mode" : cleanTitle;
+            }
+
+            BannerHeadlineText.Text = "Virtual Machines";
+            var whpxShort = _viewModel.IsWhpxWorking ? "WHPX hardware acceleration enabled" : "TCG emulation active";
+            BannerDetailText.Text = rt.TargetBinaries.Count > 0
+                ? $"{whpxShort} · {rt.TargetBinaries.Count} QEMU targets discovered ({string.Join(", ", rt.TargetBinaries.Keys)})"
+                : whpx.Explanation;
             EnableWhpxBannerBtn.Visibility = whpx.CanOfferElevatedEnable ? Visibility.Visible : Visibility.Collapsed;
         }
 
@@ -189,6 +222,26 @@ public sealed partial class MainWindow : Window
         SnapshotsViewPanel.Visibility = activePanel == SnapshotsViewPanel ? Visibility.Visible : Visibility.Collapsed;
         DownloadsViewPanel.Visibility = activePanel == DownloadsViewPanel ? Visibility.Visible : Visibility.Collapsed;
         SettingsViewPanel.Visibility = activePanel == SettingsViewPanel ? Visibility.Visible : Visibility.Collapsed;
+
+        SetSidebarNavSelected(NavHomeHighlight, NavHomeIndicator, NavHomeLabel, activePanel == LibraryViewPanel);
+        SetSidebarNavSelected(NavConsoleHighlight, NavConsoleIndicator, NavConsoleLabel, activePanel == ConsoleViewPanel);
+        SetSidebarNavSelected(null, NavWizardIndicator, NavWizardLabel, activePanel == WizardViewPanel);
+        SetSidebarNavSelected(NavHardwareHighlight, NavHardwareIndicator, NavHardwareLabel, activePanel == HardwareViewPanel);
+        SetSidebarNavSelected(NavSnapshotsHighlight, NavSnapshotsIndicator, NavSnapshotsLabel, activePanel == SnapshotsViewPanel);
+        SetSidebarNavSelected(NavDownloadsHighlight, NavDownloadsIndicator, NavDownloadsLabel, activePanel == DownloadsViewPanel);
+        SetSidebarNavSelected(NavSettingsHighlight, NavSettingsIndicator, NavSettingsLabel, activePanel == SettingsViewPanel);
+    }
+
+    private static void SetSidebarNavSelected(Border? highlight, Border indicator, TextBlock label, bool isSelected)
+    {
+        indicator.Visibility = isSelected ? Visibility.Visible : Visibility.Collapsed;
+        if (highlight is not null)
+        {
+            highlight.Visibility = isSelected ? Visibility.Visible : Visibility.Collapsed;
+            label.FontWeight = isSelected
+                ? Microsoft.UI.Text.FontWeights.SemiBold
+                : Microsoft.UI.Text.FontWeights.Normal;
+        }
     }
 
     private void OnNavHomeClick(object sender, RoutedEventArgs e)
@@ -242,12 +295,74 @@ public sealed partial class MainWindow : Window
         SwitchActiveView(SettingsViewPanel);
     }
 
+    private bool? _lastCompactTitleBar;
+
     private void OnMainRootSizeChanged(object sender, SizeChangedEventArgs e)
     {
-        // Adaptive responsive layout for Wide, Medium, and Narrow Windows 11 Snap Layouts (§62, §63)
-        var width = e.NewSize.Width;
-        TitleBarSubtitle.Visibility = width >= 920 ? Visibility.Visible : Visibility.Collapsed;
-        HeaderRightControls.Visibility = width >= 760 ? Visibility.Visible : Visibility.Collapsed;
+        UpdateResponsiveLayout(e.NewSize.Width);
+    }
+
+    private void UpdateResponsiveLayout(double width)
+    {
+        if (width <= 0)
+        {
+            return;
+        }
+
+        // Adaptive responsive layout for Wide (1420px), Medium, and Snapped Narrow (520px) Windows 11 Snap Layouts (§62, §63)
+        var compactTitleBar = width < 720;
+        CustomTitleBar.Padding = compactTitleBar ? new Thickness(12, 0, 138, 0) : new Thickness(14, 0, 148, 0);
+        TitleBarSubtitle.Visibility = width >= 760 ? Visibility.Visible : Visibility.Collapsed;
+        QemuVersionPillBorder.Visibility = width >= 760 ? Visibility.Visible : Visibility.Collapsed;
+        if (_lastCompactTitleBar != compactTitleBar)
+        {
+            _lastCompactTitleBar = compactTitleBar;
+            RefreshTopStatusBanners();
+        }
+
+        // Left navigation rail collapses cleanly to 64px compact icon rail below 860px
+        var compactRail = width < 860;
+        SidebarColumn.Width = new GridLength(compactRail ? 64 : 228);
+        SidebarBorder.Padding = compactRail ? new Thickness(8, 12, 8, 12) : new Thickness(10, 12, 10, 12);
+        ApplySidebarButtonLayout(NavWizardBtn, NavWizardLabel, compactRail, isPrimaryCta: true);
+        ApplySidebarButtonLayout(NavHomeBtn, NavHomeLabel, compactRail, isPrimaryCta: false);
+        ApplySidebarButtonLayout(NavConsoleBtn, NavConsoleLabel, compactRail, isPrimaryCta: false);
+        ApplySidebarButtonLayout(NavHardwareBtn, NavHardwareLabel, compactRail, isPrimaryCta: false);
+        ApplySidebarButtonLayout(NavSnapshotsBtn, NavSnapshotsLabel, compactRail, isPrimaryCta: false);
+        ApplySidebarButtonLayout(NavDownloadsBtn, NavDownloadsLabel, compactRail, isPrimaryCta: false);
+        ApplySidebarButtonLayout(QuickShowcaseBtn, QuickShowcaseLabel, compactRail, isPrimaryCta: false);
+        ApplySidebarButtonLayout(NavSettingsBtn, NavSettingsLabel, compactRail, isPrimaryCta: false);
+
+        WorkspaceGrid.Padding = compactTitleBar ? new Thickness(10) : new Thickness(20, 14, 20, 14);
+
+        // Home Library header & search bar wrap cleanly without clipping
+        var stackHeaderActions = width < 960;
+        Grid.SetRow(LibraryHeaderActions, stackHeaderActions ? 1 : 0);
+        Grid.SetColumn(LibraryHeaderActions, stackHeaderActions ? 0 : 1);
+        Grid.SetColumnSpan(LibraryHeaderActions, stackHeaderActions ? 2 : 1);
+        LibraryHeaderActions.HorizontalAlignment = stackHeaderActions ? HorizontalAlignment.Stretch : HorizontalAlignment.Right;
+
+        var stackSearchAndButtons = width < 720;
+        Grid.SetRow(SearchBoxHost, 0);
+        Grid.SetColumn(SearchBoxHost, 0);
+        Grid.SetColumnSpan(SearchBoxHost, stackSearchAndButtons ? 2 : 1);
+        SearchBox.Width = stackSearchAndButtons ? double.NaN : 220;
+        SearchBox.HorizontalAlignment = stackSearchAndButtons ? HorizontalAlignment.Stretch : HorizontalAlignment.Left;
+        Grid.SetRow(LibraryHeaderButtons, stackSearchAndButtons ? 1 : 0);
+        Grid.SetColumn(LibraryHeaderButtons, stackSearchAndButtons ? 0 : 1);
+        Grid.SetColumnSpan(LibraryHeaderButtons, stackSearchAndButtons ? 2 : 1);
+
+        // Console toolbar + 320px developer drawer
+        var stackConsoleBar = width < 920;
+        Grid.SetRow(ConsolePrimaryRightBar, stackConsoleBar ? 1 : 0);
+        Grid.SetColumn(ConsolePrimaryRightBar, stackConsoleBar ? 0 : 1);
+        Grid.SetColumnSpan(ConsolePrimaryRightBar, stackConsoleBar ? 2 : 1);
+        ConsolePrimaryRightBar.HorizontalAlignment = stackConsoleBar ? HorizontalAlignment.Left : HorizontalAlignment.Right;
+        ConsoleVmSelector.Width = compactTitleBar ? 150 : 210;
+        if (_viewModel.SelectedVm is { } selectedCard)
+        {
+            UpdateConsoleToolbarForSelectedVm(selectedCard);
+        }
 
         if (width < 880)
         {
@@ -256,9 +371,181 @@ public sealed partial class MainWindow : Window
         }
         else if (ToggleDevDrawerBtn.IsChecked == true)
         {
-            DevDrawerColumn.Width = new GridLength(360);
+            DevDrawerColumn.Width = new GridLength(320);
             DevDrawerPanel.Visibility = Visibility.Visible;
         }
+        else
+        {
+            DevDrawerColumn.Width = new GridLength(0);
+            DevDrawerPanel.Visibility = Visibility.Collapsed;
+        }
+
+        // Wizard, Hardware, Snapshots, Downloads & Settings responsive form grids
+        var stackTwoCol = width < 760;
+        var stackThreeCol = width < 820;
+
+        Grid.SetRow(WizardPresetField, 0);
+        Grid.SetColumn(WizardPresetField, 0);
+        Grid.SetColumnSpan(WizardPresetField, stackTwoCol ? 2 : 1);
+        Grid.SetRow(WizardVmNameField, stackTwoCol ? 1 : 0);
+        Grid.SetColumn(WizardVmNameField, stackTwoCol ? 0 : 1);
+        Grid.SetColumnSpan(WizardVmNameField, stackTwoCol ? 2 : 1);
+
+        SetThreeColResponsive(WizardRamField, WizardCpuField, WizardDiskField, stackThreeCol);
+        SetThreeColResponsive(WizardUsernameBox, WizardHostnameBox, WizardPasswordBox, stackThreeCol);
+
+        Grid.SetRow(HwSaveChangesBtn, stackTwoCol ? 1 : 0);
+        Grid.SetColumn(HwSaveChangesBtn, stackTwoCol ? 0 : 1);
+        HwSaveChangesBtn.HorizontalAlignment = stackTwoCol ? HorizontalAlignment.Left : HorizontalAlignment.Right;
+        SetThreeColResponsive(HwCol0Stack, HwCol1Stack, HwCol2Stack, stackThreeCol);
+
+        var singleColFlags = width < 700;
+        FrameworkElement[] flagChecks =
+        [
+            HwSecureBootCheck, HwTpm2Check, HwGuestAgentCheck,
+            HwSerialConsoleCheck, HwGdbStubCheck, HwPauseAtStartCheck
+        ];
+        for (var i = 0; i < flagChecks.Length; i++)
+        {
+            Grid.SetRow(flagChecks[i], singleColFlags ? i : i / 2);
+            Grid.SetColumn(flagChecks[i], singleColFlags ? 0 : i % 2);
+            Grid.SetColumnSpan(flagChecks[i], singleColFlags ? 2 : 1);
+        }
+
+        if (stackThreeCol)
+        {
+            Grid.SetRow(PfRuleNameBox, 0);
+            Grid.SetColumn(PfRuleNameBox, 0);
+            Grid.SetColumnSpan(PfRuleNameBox, 5);
+            Grid.SetRow(PfProtocolCombo, 1);
+            Grid.SetColumn(PfProtocolCombo, 0);
+            PfProtocolCombo.Width = 84;
+            PfProtocolCombo.HorizontalAlignment = HorizontalAlignment.Left;
+            Grid.SetRow(PfHostPortBox, 1);
+            Grid.SetColumn(PfHostPortBox, 1);
+            PfHostPortBox.Width = 88;
+            Grid.SetRow(PfGuestPortBox, 1);
+            Grid.SetColumn(PfGuestPortBox, 2);
+            PfGuestPortBox.Width = 88;
+            Grid.SetRow(PfAddBtn, 1);
+            Grid.SetColumn(PfAddBtn, 3);
+            Grid.SetColumnSpan(PfAddBtn, 2);
+            PfAddBtn.HorizontalAlignment = HorizontalAlignment.Right;
+        }
+        else
+        {
+            Grid.SetRow(PfRuleNameBox, 0);
+            Grid.SetColumn(PfRuleNameBox, 0);
+            Grid.SetColumnSpan(PfRuleNameBox, 1);
+            Grid.SetRow(PfProtocolCombo, 0);
+            Grid.SetColumn(PfProtocolCombo, 1);
+            PfProtocolCombo.Width = 92;
+            PfProtocolCombo.HorizontalAlignment = HorizontalAlignment.Stretch;
+            Grid.SetRow(PfHostPortBox, 0);
+            Grid.SetColumn(PfHostPortBox, 2);
+            PfHostPortBox.Width = 105;
+            Grid.SetRow(PfGuestPortBox, 0);
+            Grid.SetColumn(PfGuestPortBox, 3);
+            PfGuestPortBox.Width = 105;
+            Grid.SetRow(PfAddBtn, 0);
+            Grid.SetColumn(PfAddBtn, 4);
+            Grid.SetColumnSpan(PfAddBtn, 1);
+            PfAddBtn.HorizontalAlignment = HorizontalAlignment.Left;
+        }
+
+        SetThreeColResponsive(NewSnapshotNameBox, NewSnapshotDescBox, TakeSnapshotBtn, stackThreeCol);
+        TakeSnapshotBtn.HorizontalAlignment = stackThreeCol ? HorizontalAlignment.Left : HorizontalAlignment.Stretch;
+
+        SetThreeColResponsive(CloneVmNameBox, CloneTypeCombo, ExecuteCloneBtn, stackThreeCol);
+        ExecuteCloneBtn.HorizontalAlignment = stackThreeCol ? HorizontalAlignment.Left : HorizontalAlignment.Stretch;
+
+        if (compactTitleBar)
+        {
+            Grid.SetRow(DownloadsProvisionBtn, 0);
+            Grid.SetColumn(DownloadsProvisionBtn, 0);
+            Grid.SetColumnSpan(DownloadsProvisionBtn, 3);
+            Grid.SetRow(DownloadsBootAllBtn, 1);
+            Grid.SetColumn(DownloadsBootAllBtn, 0);
+            Grid.SetColumnSpan(DownloadsBootAllBtn, 3);
+        }
+        else
+        {
+            Grid.SetRow(DownloadsProvisionBtn, 0);
+            Grid.SetColumn(DownloadsProvisionBtn, 0);
+            Grid.SetColumnSpan(DownloadsProvisionBtn, 1);
+            Grid.SetRow(DownloadsBootAllBtn, 0);
+            Grid.SetColumn(DownloadsBootAllBtn, 1);
+            Grid.SetColumnSpan(DownloadsBootAllBtn, 1);
+        }
+
+        var stackSettingsCards = width < 980;
+        Grid.SetRow(SettingsAppearanceCard, 0);
+        Grid.SetColumn(SettingsAppearanceCard, 0);
+        Grid.SetColumnSpan(SettingsAppearanceCard, stackSettingsCards ? 2 : 1);
+        Grid.SetRow(SettingsRuntimeCard, stackSettingsCards ? 1 : 0);
+        Grid.SetColumn(SettingsRuntimeCard, stackSettingsCards ? 0 : 1);
+        Grid.SetColumnSpan(SettingsRuntimeCard, stackSettingsCards ? 2 : 1);
+
+        if (width < 660)
+        {
+            Grid.SetRow(SettingsReprobeBtn, 0);
+            Grid.SetColumn(SettingsReprobeBtn, 0);
+            Grid.SetColumnSpan(SettingsReprobeBtn, 3);
+            Grid.SetRow(InstallManagedQemuBtn, 1);
+            Grid.SetColumn(InstallManagedQemuBtn, 0);
+            Grid.SetColumnSpan(InstallManagedQemuBtn, 3);
+            Grid.SetRow(SettingsEnableWhpxBtn, 2);
+            Grid.SetColumn(SettingsEnableWhpxBtn, 0);
+            Grid.SetColumnSpan(SettingsEnableWhpxBtn, 3);
+        }
+        else if (width < 980 || width >= 1280)
+        {
+            Grid.SetRow(SettingsReprobeBtn, 0);
+            Grid.SetColumn(SettingsReprobeBtn, 0);
+            Grid.SetColumnSpan(SettingsReprobeBtn, 1);
+            Grid.SetRow(InstallManagedQemuBtn, 0);
+            Grid.SetColumn(InstallManagedQemuBtn, 1);
+            Grid.SetColumnSpan(InstallManagedQemuBtn, 1);
+            Grid.SetRow(SettingsEnableWhpxBtn, 0);
+            Grid.SetColumn(SettingsEnableWhpxBtn, 2);
+            Grid.SetColumnSpan(SettingsEnableWhpxBtn, 1);
+        }
+        else
+        {
+            Grid.SetRow(SettingsReprobeBtn, 0);
+            Grid.SetColumn(SettingsReprobeBtn, 0);
+            Grid.SetColumnSpan(SettingsReprobeBtn, 1);
+            Grid.SetRow(InstallManagedQemuBtn, 0);
+            Grid.SetColumn(InstallManagedQemuBtn, 1);
+            Grid.SetColumnSpan(InstallManagedQemuBtn, 1);
+            Grid.SetRow(SettingsEnableWhpxBtn, 1);
+            Grid.SetColumn(SettingsEnableWhpxBtn, 0);
+            Grid.SetColumnSpan(SettingsEnableWhpxBtn, 1);
+        }
+    }
+
+    private static void ApplySidebarButtonLayout(Button btn, TextBlock label, bool compactRail, bool isPrimaryCta)
+    {
+        label.Visibility = compactRail ? Visibility.Collapsed : Visibility.Visible;
+        btn.HorizontalContentAlignment = compactRail ? HorizontalAlignment.Center : HorizontalAlignment.Left;
+        btn.Padding = compactRail
+            ? new Thickness(0, 10, 0, 10)
+            : (isPrimaryCta ? new Thickness(14, 10, 14, 10) : new Thickness(14, 9, 14, 9));
+    }
+
+    private static void SetThreeColResponsive(FrameworkElement c0, FrameworkElement c1, FrameworkElement c2, bool stack)
+    {
+        Grid.SetRow(c0, 0);
+        Grid.SetColumn(c0, 0);
+        Grid.SetColumnSpan(c0, stack ? 3 : 1);
+
+        Grid.SetRow(c1, stack ? 1 : 0);
+        Grid.SetColumn(c1, stack ? 0 : 1);
+        Grid.SetColumnSpan(c1, stack ? 3 : 1);
+
+        Grid.SetRow(c2, stack ? 2 : 0);
+        Grid.SetColumn(c2, stack ? 0 : 2);
+        Grid.SetColumnSpan(c2, stack ? 3 : 1);
     }
 
     private void OnMainRootDragOver(object sender, DragEventArgs e)
@@ -386,7 +673,7 @@ public sealed partial class MainWindow : Window
         {
             EmbeddedDisplayOverlay.Visibility = Visibility.Visible;
             EmbeddedOverlayTitle.Text = $"{card.Name} is Stopped";
-            EmbeddedOverlaySubtitle.Text = $"Architecture: {card.ArchitectureBadge} · {card.ResourceSummary}\nPress '▶ Start VM' above to boot this virtual machine.";
+            EmbeddedOverlaySubtitle.Text = $"Architecture: {card.ArchitectureBadge} · {card.ResourceSummary}\nPress 'Start VM' above to boot this virtual machine.";
         }
     }
 
@@ -487,12 +774,31 @@ public sealed partial class MainWindow : Window
 
     private void UpdateConsoleToolbarForSelectedVm(VmCardItem card)
     {
-        ConsoleAccelBadge.Text = card.IsRunningOrPaused
-            ? card.ActiveAccelerator.ToUpperInvariant()
-            : card.Vm.Accelerator.ToString().ToUpperInvariant();
+        var isWhpxActive = card.IsRunningOrPaused
+            ? string.Equals(card.ActiveAccelerator, "whpx", StringComparison.OrdinalIgnoreCase)
+            : card.UsesWhpxByDefault && _viewModel.IsWhpxWorking;
+
+        var compactBadge = MainRootGrid.ActualWidth > 0 && MainRootGrid.ActualWidth < 680;
+        if (isWhpxActive)
+        {
+            ConsoleAccelBadgeBorder.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x23, 0x86, 0x36));
+            ConsoleAccelBadgeBorder.BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x2E, 0xA0, 0x43));
+            ConsoleAccelIcon.Glyph = "\uE945";
+            ConsoleAccelBadge.Text = compactBadge ? "WHPX" : "WHPX ACCELERATED";
+        }
+        else
+        {
+            ConsoleAccelBadgeBorder.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x1F, 0x6F, 0xEB));
+            ConsoleAccelBadgeBorder.BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x38, 0x8B, 0xFD));
+            ConsoleAccelIcon.Glyph = "\uE964";
+            ConsoleAccelBadge.Text = compactBadge ? "TCG" : "TCG EMULATION";
+        }
+
         ConsoleStateText.Text = card.StatusBadgeText;
-        ConsoleStartStopBtn.Content = card.IsRunningOrPaused ? "⏻ Shut Down" : "▶ Start VM";
-        ConsolePauseBtn.Content = card.State == VmState.Paused ? "▶ Resume" : "⏸ Pause";
+        ConsoleStartStopIcon.Glyph = card.IsRunningOrPaused ? "\uE7E8" : "\uE768";
+        ConsoleStartStopText.Text = card.IsRunningOrPaused ? "Shut Down" : "Start VM";
+        ConsolePauseIcon.Glyph = card.State == VmState.Paused ? "\uE768" : "\uE769";
+        ConsolePauseText.Text = card.State == VmState.Paused ? "Resume" : "Pause";
 
         var cdrom = card.Vm.Storage.FirstOrDefault(d => d.Media == "cdrom");
         CurrentIsoMenuText.Text = cdrom is not null && !string.IsNullOrWhiteSpace(cdrom.Path)
@@ -680,6 +986,8 @@ public sealed partial class MainWindow : Window
         {
             _isFullscreen = !_isFullscreen;
             AppWindow.SetPresenter(_isFullscreen ? AppWindowPresenterKind.FullScreen : AppWindowPresenterKind.Overlapped);
+            ConsoleFullscreenIcon.Glyph = _isFullscreen ? "\uE73F" : "\uE740";
+            ConsoleFullscreenText.Text = _isFullscreen ? "Exit Full" : "Fullscreen";
         }
         catch
         {
@@ -688,9 +996,15 @@ public sealed partial class MainWindow : Window
 
     private void OnToggleDevDrawerClick(object sender, RoutedEventArgs e)
     {
-        var show = ToggleDevDrawerBtn.IsChecked == true;
-        DevDrawerColumn.Width = show ? new GridLength(380) : new GridLength(0);
-        DevDrawerPanel.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        SetDevDrawerOpen(ToggleDevDrawerBtn.IsChecked == true);
+    }
+
+    private void SetDevDrawerOpen(bool open)
+    {
+        ToggleDevDrawerBtn.IsChecked = open;
+        var canShow = open && (MainRootGrid.ActualWidth <= 0 || MainRootGrid.ActualWidth >= 880);
+        DevDrawerColumn.Width = canShow ? new GridLength(320) : new GridLength(0);
+        DevDrawerPanel.Visibility = canShow ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private async void OnSendSerialInputClick(object sender, RoutedEventArgs e)
@@ -1026,7 +1340,7 @@ public sealed partial class MainWindow : Window
         var warning = ResourceRecommender.ValidateResourceSelection(preset, ram, cpu, disk);
         if (!string.IsNullOrWhiteSpace(warning))
         {
-            WizardResourceWarningText.Text = $"⚠ {warning}";
+            WizardResourceWarningText.Text = warning;
             WizardResourceWarningText.Visibility = Visibility.Visible;
         }
         else
@@ -1083,7 +1397,8 @@ public sealed partial class MainWindow : Window
     private void LoadVmIntoHardwareEditor(VmCardItem card)
     {
         var vm = card.Vm;
-        HwEditorHeaderText.Text = $"Hardware Editor — {card.Name} ({card.ArchitectureBadge})";
+        HwEditorHeaderText.Text = $"Hardware Editor — {card.Name}";
+        HwEditorSubtitleText.Text = $"Target Architecture: {card.ArchitectureBadge} · Configure chipset, CPU, UEFI/Secure Boot, TPM 2.0, storage, port forwarding, and QEMU flags.";
         HwNameBox.Text = vm.Identity.Name;
         HwMachineTypeBox.Text = vm.Machine.MachineType;
         HwCpuModelBox.Text = vm.Cpu.CpuModel;
@@ -1120,6 +1435,7 @@ public sealed partial class MainWindow : Window
     private void RefreshPortForwardSummary(VirtualMachine vm)
     {
         var rules = vm.Network.FirstOrDefault()?.PortForwards ?? [];
+        PortForwardRulesList.ItemsSource = rules.Select(r => new PortForwardRuleItem(r)).ToList();
         if (rules.Count == 0)
         {
             PortForwardSummaryText.Text = "No port forwarding rules configured (User-mode NAT outbound internet active).";
@@ -1127,7 +1443,7 @@ public sealed partial class MainWindow : Window
         }
 
         PortForwardSummaryText.Text = string.Join("  |  ",
-            rules.Select(r => $"{r.Name}: {r.Protocol.ToUpperInvariant()} {r.HostBindAddress}:{r.HostPort} → Guest :{r.GuestPort}"));
+            rules.Select(r => $"{r.Name}: {r.Protocol.ToUpperInvariant()} {r.HostBindAddress}:{r.HostPort} -> Guest :{r.GuestPort}"));
     }
 
     private void RefreshGeneratedCommandPreview(VirtualMachine vm)
@@ -1170,6 +1486,21 @@ public sealed partial class MainWindow : Window
         nic.PortForwards.Add(rule);
         RefreshPortForwardSummary(card.Vm);
         RefreshGeneratedCommandPreview(card.Vm);
+    }
+
+    private void OnRemovePortForwardClick(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel.SelectedVm is not { } card) return;
+        if (sender is FrameworkElement { Tag: PortForwardRuleItem item })
+        {
+            var nic = card.Vm.Network.FirstOrDefault();
+            if (nic is not null && nic.PortForwards.Remove(item.Rule))
+            {
+                RefreshPortForwardSummary(card.Vm);
+                RefreshGeneratedCommandPreview(card.Vm);
+                GlobalStatusText.Text = $"Removed port forward '{item.Name}'. Click Save Hardware Changes to persist.";
+            }
+        }
     }
 
     private async void OnSaveHardwareEditorClick(object sender, RoutedEventArgs e)
@@ -1326,7 +1657,7 @@ public sealed partial class MainWindow : Window
 
         var catalog = await _viewModel.SnapshotManager.LoadCatalogAsync(card.Vm, qemuImg);
         var sb = new StringBuilder();
-        sb.AppendLine($"● Current State ({card.StatusBadgeText})");
+        sb.AppendLine($"Current State ({card.StatusBadgeText})");
         for (var i = catalog.Snapshots.Count - 1; i >= 0; i--)
         {
             var s = catalog.Snapshots[i];
@@ -1449,14 +1780,51 @@ public sealed partial class MainWindow : Window
     private void PopulateOsDownloadsView()
     {
         var entries = OsDownloadCatalog.GetAll();
+        OsDownloadCardsList.ItemsSource = entries.Select(entry =>
+        {
+            var sizeMb = entry.ApproximateSizeBytes / (1024 * 1024);
+            return new OsDownloadCardItem(
+                entry.Id,
+                entry.Name,
+                entry.Version,
+                entry.Architecture.ToDisplayName(),
+                $"{entry.PublisherName} · ~{sizeMb:N0} MiB",
+                entry.OfficialSourceUrl,
+                entry.IsDirectIsoDownload ? "Direct ISO" : "Official Download Page");
+        }).ToList();
+
         var sb = new StringBuilder();
         foreach (var entry in entries)
         {
             var sizeMb = entry.ApproximateSizeBytes / (1024 * 1024);
-            sb.AppendLine($"• {entry.Name} [{entry.Architecture.ToDisplayName()}] — ~{sizeMb:N0} MiB ({entry.PublisherName})");
+            sb.AppendLine($"- {entry.Name} [{entry.Architecture.ToDisplayName()}] — ~{sizeMb:N0} MiB ({entry.PublisherName})");
             sb.AppendLine($"  Source: {entry.OfficialSourceUrl}");
         }
         OsDownloadCatalogText.Text = sb.ToString().TrimEnd();
+    }
+
+    private void OnCopyDownloadUrlClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: string url } && !string.IsNullOrWhiteSpace(url))
+        {
+            CopyTextToClipboard(url);
+            GlobalStatusText.Text = $"Copied official OS download URL to clipboard: {url}";
+        }
+    }
+
+    private async void OnOpenDownloadUrlClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: string url } && Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            try
+            {
+                await Windows.System.Launcher.LaunchUriAsync(uri);
+            }
+            catch (Exception ex)
+            {
+                GlobalStatusText.Text = $"Could not open URL: {ex.Message}";
+            }
+        }
     }
 
     private async void OnBootAndScreenshotAllShowcaseVmsClick(object sender, RoutedEventArgs e)
@@ -1479,9 +1847,24 @@ public sealed partial class MainWindow : Window
         ClosePolicyCombo.SelectedIndex = (int)_viewModel.Settings.CloseRunningVmPolicy;
 
         SettingsRuntimeSummaryText.Text = _viewModel.RuntimeInfo.HealthSummary;
-        SettingsWhpxSummaryText.Text = _viewModel.WhpxReport is not null
-            ? $"{_viewModel.WhpxReport.UserFriendlyTitle}\n{_viewModel.WhpxReport.Explanation}"
-            : "WHPX status not yet probed.";
+        if (_viewModel.WhpxReport is { } whpx)
+        {
+            var cleanTitle = whpx.UserFriendlyTitle
+                .Replace("✓ ", string.Empty, StringComparison.Ordinal)
+                .Replace("✓", string.Empty, StringComparison.Ordinal)
+                .Trim();
+            SettingsWhpxInfoBar.Title = cleanTitle;
+            SettingsWhpxInfoBar.Message = whpx.Explanation;
+            SettingsWhpxInfoBar.Severity = _viewModel.IsWhpxWorking
+                ? InfoBarSeverity.Success
+                : (whpx.CanOfferElevatedEnable ? InfoBarSeverity.Warning : InfoBarSeverity.Informational);
+        }
+        else
+        {
+            SettingsWhpxInfoBar.Title = "WHPX status not yet probed";
+            SettingsWhpxInfoBar.Message = "Select Re-Probe Runtime to inspect QEMU targets and Windows Hypervisor Platform support.";
+            SettingsWhpxInfoBar.Severity = InfoBarSeverity.Informational;
+        }
 
         var diag = DiagnosticsReportBuilder.FormatSanitizedReport(_viewModel.BuildDiagnosticsReport());
         var score = _viewModel.BuildReadinessScoreReport();
@@ -1497,13 +1880,64 @@ public sealed partial class MainWindow : Window
 
     private void OnThemeSelectorChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (Content is not FrameworkElement root) return;
-        root.RequestedTheme = ThemeSelectorCombo.SelectedIndex switch
+        var theme = ThemeSelectorCombo.SelectedIndex switch
         {
             1 => ElementTheme.Light,
             2 => ElementTheme.Dark,
             _ => ElementTheme.Default
         };
+        ApplyThemeToWindow(theme);
+    }
+
+    private void ApplyThemePreference(AppThemePreference preference)
+    {
+        var theme = preference switch
+        {
+            AppThemePreference.Light => ElementTheme.Light,
+            AppThemePreference.Dark => ElementTheme.Dark,
+            _ => ElementTheme.Default
+        };
+        ApplyThemeToWindow(theme);
+    }
+
+    private void ApplyThemeToWindow(ElementTheme theme)
+    {
+        if (Content is not FrameworkElement root)
+        {
+            return;
+        }
+
+        root.RequestedTheme = theme;
+
+        var isLight = theme == ElementTheme.Light ||
+                      (theme == ElementTheme.Default && Application.Current.RequestedTheme == ApplicationTheme.Light);
+        try
+        {
+            var titleBar = AppWindow.TitleBar;
+            if (isLight)
+            {
+                titleBar.ButtonForegroundColor = Windows.UI.Color.FromArgb(255, 0x1A, 0x1A, 0x1A);
+                titleBar.ButtonHoverForegroundColor = Windows.UI.Color.FromArgb(255, 0x00, 0x00, 0x00);
+                titleBar.ButtonHoverBackgroundColor = Windows.UI.Color.FromArgb(20, 0x00, 0x00, 0x00);
+                titleBar.ButtonPressedForegroundColor = Windows.UI.Color.FromArgb(255, 0x00, 0x00, 0x00);
+                titleBar.ButtonPressedBackgroundColor = Windows.UI.Color.FromArgb(35, 0x00, 0x00, 0x00);
+                titleBar.ButtonInactiveForegroundColor = Windows.UI.Color.FromArgb(255, 0x6E, 0x6E, 0x6E);
+            }
+            else
+            {
+                titleBar.ButtonForegroundColor = Windows.UI.Color.FromArgb(255, 0xFF, 0xFF, 0xFF);
+                titleBar.ButtonHoverForegroundColor = Windows.UI.Color.FromArgb(255, 0xFF, 0xFF, 0xFF);
+                titleBar.ButtonHoverBackgroundColor = Windows.UI.Color.FromArgb(24, 0xFF, 0xFF, 0xFF);
+                titleBar.ButtonPressedForegroundColor = Windows.UI.Color.FromArgb(255, 0xFF, 0xFF, 0xFF);
+                titleBar.ButtonPressedBackgroundColor = Windows.UI.Color.FromArgb(40, 0xFF, 0xFF, 0xFF);
+                titleBar.ButtonInactiveForegroundColor = Windows.UI.Color.FromArgb(255, 0x99, 0x99, 0x99);
+            }
+            titleBar.ButtonBackgroundColor = Microsoft.UI.Colors.Transparent;
+            titleBar.ButtonInactiveBackgroundColor = Microsoft.UI.Colors.Transparent;
+        }
+        catch
+        {
+        }
     }
 
     private async void OnSaveSettingsClick(object sender, RoutedEventArgs e)
@@ -1891,21 +2325,19 @@ public sealed partial class MainWindow : Window
             Directory.CreateDirectory(outputDir);
             await Task.Delay(1200);
 
-            var root = Content as FrameworkElement;
-
             // 1. Capture Main Library View (Dark Mode, Wide 1380x880)
-            if (root is not null) root.RequestedTheme = ElementTheme.Dark;
+            ApplyThemeToWindow(ElementTheme.Dark);
             SwitchActiveView(LibraryViewPanel);
             await Task.Delay(600);
             CaptureWindowScreenshot(Path.Combine(outputDir, "01-library-dark-wide.png"));
 
             // 2. Capture Main Library View (Light Mode)
-            if (root is not null) root.RequestedTheme = ElementTheme.Light;
+            ApplyThemeToWindow(ElementTheme.Light);
             await Task.Delay(600);
             CaptureWindowScreenshot(Path.Combine(outputDir, "02-library-light-wide.png"));
 
             // Restore Dark Mode
-            if (root is not null) root.RequestedTheme = ElementTheme.Dark;
+            ApplyThemeToWindow(ElementTheme.Dark);
             await Task.Delay(400);
 
             // 3. Capture Narrow Snapped Layout (Windows 11 1/3 Snap width: 520x840) (§62, §63, §74)
@@ -1996,98 +2428,108 @@ public sealed partial class MainWindow : Window
                 .ToList();
         }
 
+        var previousDrawerOpen = ToggleDevDrawerBtn.IsChecked == true;
+        SetDevDrawerOpen(true);
+
         var index = 9;
 
-        foreach (var card in cards)
+        try
         {
-            var wasAlreadyRunning = card.IsRunningOrPaused;
-            ShowcaseProgressText.Text = $"Booting {card.Name} ({card.ArchitectureBadge})...";
-            if (!wasAlreadyRunning)
+            foreach (var card in cards)
             {
-                await StartVmAndOpenConsoleAsync(card);
-            }
-            else
-            {
-                await AttachEmbeddedConsoleToCardAsync(card);
-            }
-
-            // Wait for firmware + bootloader/OS to render onto the VNC framebuffer
-            if (card.Vm.Architecture is VmArchitecture.Aarch64 or VmArchitecture.Riscv64)
-            {
-                var shellWaitMs = card.Vm.Architecture == VmArchitecture.Riscv64 ? 8500 : 5800;
-                await Task.Delay(shellWaitMs);
-                // Skip the 5-second UEFI Shell startup.nsh countdown immediately
-                if (_activeConsoleSession is not null)
+                var wasAlreadyRunning = card.IsRunningOrPaused;
+                ShowcaseProgressText.Text = $"Booting {card.Name} ({card.ArchitectureBadge})...";
+                if (!wasAlreadyRunning)
                 {
-                    await _activeConsoleSession.SendSerialInputAsync("\r\n");
+                    await StartVmAndOpenConsoleAsync(card);
                 }
+                else
+                {
+                    await AttachEmbeddedConsoleToCardAsync(card);
+                }
+
+                // Wait for firmware + bootloader/OS to render onto the VNC framebuffer
+                if (card.Vm.Architecture is VmArchitecture.Aarch64 or VmArchitecture.Riscv64)
+                {
+                    var shellWaitMs = card.Vm.Architecture == VmArchitecture.Riscv64 ? 8500 : 5800;
+                    await Task.Delay(shellWaitMs);
+                    // Skip the 5-second UEFI Shell startup.nsh countdown immediately
+                    if (_activeConsoleSession is not null)
+                    {
+                        await _activeConsoleSession.SendSerialInputAsync("\r\n");
+                    }
+                    if (_embeddedVncClient is not null)
+                    {
+                        await _embeddedVncClient.SendKeyEventAsync(0xFF0Du, isDown: true);
+                        await _embeddedVncClient.SendKeyEventAsync(0xFF0Du, isDown: false);
+                    }
+                    await Task.Delay(2500);
+                }
+                else if (card.Vm.Architecture == VmArchitecture.Ppc64)
+                {
+                    await Task.Delay(3000);
+                    if (_embeddedVncClient is not null)
+                    {
+                        await _embeddedVncClient.SendAsciiTextAsync("dev /cpus/PowerPC,970fx .properties\n");
+                    }
+                    await Task.Delay(1800);
+                }
+                else
+                {
+                    await Task.Delay(2500);
+                }
+
+                var slug = VmConfigurationStore.SanitizeFolderName(card.Name, card.Id)
+                    .ToLowerInvariant()
+                    .Replace(' ', '-');
+
+                // Save direct VNC guest framebuffer PNG
                 if (_embeddedVncClient is not null)
                 {
-                    await _embeddedVncClient.SendKeyEventAsync(0xFF0Du, isDown: true);
-                    await _embeddedVncClient.SendKeyEventAsync(0xFF0Du, isDown: false);
+                    var pixels = _embeddedVncClient.SnapshotCurrentFramebuffer(out var w, out var h);
+                    if (w > 0 && h > 0)
+                    {
+                        var fbPngPath = Path.Combine(outputDir, $"{index:00}-framebuffer-{slug}.png");
+                        FastFramebufferPresenter.SaveBgraAsPng(fbPngPath, pixels, w, h);
+                        card.ScreenshotPath = fbPngPath;
+                    }
                 }
-                await Task.Delay(2500);
-            }
-            else if (card.Vm.Architecture == VmArchitecture.Ppc64)
-            {
-                await Task.Delay(3000);
-                if (_embeddedVncClient is not null)
+
+                // Also execute live `query-status` in the QMP Inspector so the drawer shows live QMP JSON!
+                if (_activeConsoleSession is not null && _activeConsoleSession.Qmp.IsConnected)
                 {
-                    await _embeddedVncClient.SendAsciiTextAsync("dev /cpus/PowerPC,970fx .properties\n");
+                    try
+                    {
+                        var qmpJson = await _activeConsoleSession.Qmp.ExecuteInspectorCommandAsync("query-status", false);
+                        QmpInspectorOutputText.Text = $"> query-status\n{qmpJson}";
+                    }
+                    catch { }
                 }
-                await Task.Delay(1800);
-            }
-            else
-            {
-                await Task.Delay(2500);
-            }
 
-            var slug = VmConfigurationStore.SanitizeFolderName(card.Name, card.Id)
-                .ToLowerInvariant()
-                .Replace(' ', '-');
+                await Task.Delay(350);
 
-            // Save direct VNC guest framebuffer PNG
-            if (_embeddedVncClient is not null)
-            {
-                var pixels = _embeddedVncClient.SnapshotCurrentFramebuffer(out var w, out var h);
-                if (w > 0 && h > 0)
+                // Capture the entire WinUI 3 application window showing the embedded guest display + Serial Console + QMP Inspector!
+                var appWindowShotPath = Path.Combine(outputDir, $"{index:00}-app-window-{slug}.png");
+                CaptureWindowScreenshot(appWindowShotPath);
+
+                // Stop only VMs started by this capture run before moving to the next architecture
+                if (!wasAlreadyRunning)
                 {
-                    var fbPngPath = Path.Combine(outputDir, $"{index:00}-framebuffer-{slug}.png");
-                    FastFramebufferPresenter.SaveBgraAsPng(fbPngPath, pixels, w, h);
-                    card.ScreenshotPath = fbPngPath;
+                    var session = _viewModel.ProcessManager.GetSession(card.Id);
+                    if (session is not null)
+                    {
+                        await session.ForceStopAsync();
+                        card.State = VmState.Stopped;
+                        RefreshTopStatusBanners();
+                    }
                 }
+
+                index++;
             }
-
-            // Also execute live `query-status` in the QMP Inspector so the drawer shows live QMP JSON!
-            if (_activeConsoleSession is not null && _activeConsoleSession.Qmp.IsConnected)
-            {
-                try
-                {
-                    var qmpJson = await _activeConsoleSession.Qmp.ExecuteInspectorCommandAsync("query-status", false);
-                    QmpInspectorOutputText.Text = $"> query-status\n{qmpJson}";
-                }
-                catch { }
-            }
-
-            await Task.Delay(350);
-
-            // Capture the entire WinUI 3 application window showing the embedded guest display + Serial Console + QMP Inspector!
-            var appWindowShotPath = Path.Combine(outputDir, $"{index:00}-app-window-{slug}.png");
-            CaptureWindowScreenshot(appWindowShotPath);
-
-            // Stop only VMs started by this capture run before moving to the next architecture
-            if (!wasAlreadyRunning)
-            {
-                var session = _viewModel.ProcessManager.GetSession(card.Id);
-                if (session is not null)
-                {
-                    await session.ForceStopAsync();
-                    card.State = VmState.Stopped;
-                    RefreshTopStatusBanners();
-                }
-            }
-
-            index++;
+        }
+        finally
+        {
+            SetDevDrawerOpen(previousDrawerOpen);
         }
     }
 

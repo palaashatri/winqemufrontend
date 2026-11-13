@@ -42,6 +42,9 @@ public sealed class UiAutomationTests
         Assert.Contains("NavDownloadsBtn", automationIds);
         Assert.Contains("NavSettingsBtn", automationIds);
         Assert.Contains("VmLibraryGridView", automationIds);
+        Assert.Contains("ProvisionMultiArchBtn", automationIds);
+        Assert.Contains("VmSearchBox", automationIds);
+        Assert.Contains("OsDownloadCardsList", automationIds);
 
         // Verify keyboard accelerators (Ctrl+N, Alt+1, Alt+2) are registered with valid Key/Modifiers (§61)
         var accelerators = doc.Descendants().Where(e => e.Name.LocalName == "KeyboardAccelerator").ToList();
@@ -49,6 +52,74 @@ public sealed class UiAutomationTests
         Assert.Contains(accelerators, a =>
             a.Attribute("Key")?.Value == "N" &&
             a.Attribute("Modifiers")?.Value == "Control");
+        Assert.Contains(accelerators, a =>
+            a.Attribute("Key")?.Value == "Number1" &&
+            a.Attribute("Modifiers")?.Value == "Menu");
+        Assert.Contains(accelerators, a =>
+            a.Attribute("Key")?.Value == "Number2" &&
+            a.Attribute("Modifiers")?.Value == "Menu");
+    }
+
+    [Fact]
+    public void MainWindowAndDisplayWindowXaml_EnforceFluentShellAndZeroCartoonEmojis()
+    {
+        var repoRoot = GetRepoRoot();
+        var mainXamlPath = Path.Combine(repoRoot, "src", "App", "MainWindow.xaml");
+        var displayXamlPath = Path.Combine(repoRoot, "src", "App", "VmDisplayWindow.xaml");
+
+        Assert.True(File.Exists(mainXamlPath), $"Expected MainWindow.xaml at {mainXamlPath}");
+        Assert.True(File.Exists(displayXamlPath), $"Expected VmDisplayWindow.xaml at {displayXamlPath}");
+
+        var mainText = File.ReadAllText(mainXamlPath);
+        var displayText = File.ReadAllText(displayXamlPath);
+        var mainDoc = XDocument.Parse(mainText);
+        var displayDoc = XDocument.Parse(displayText);
+
+        XNamespace xNs = "http://schemas.microsoft.com/winfx/2006/xaml";
+        var mainNames = mainDoc.Descendants()
+            .Select(e => e.Attribute(xNs + "Name")?.Value)
+            .Where(v => !string.IsNullOrEmpty(v))
+            .ToHashSet(StringComparer.Ordinal);
+        var displayNames = displayDoc.Descendants()
+            .Select(e => e.Attribute(xNs + "Name")?.Value)
+            .Where(v => !string.IsNullOrEmpty(v))
+            .ToHashSet(StringComparer.Ordinal);
+
+        Assert.Contains("SidebarColumn", mainNames);
+        Assert.Contains("WhpxStatusPill", mainNames);
+        Assert.Contains("QemuVersionPillBorder", mainNames);
+        Assert.Contains("ConsoleAccelBadgeBorder", mainNames);
+        Assert.Contains("PortForwardRulesList", mainNames);
+        Assert.Contains("OsDownloadCardsList", mainNames);
+        Assert.Contains("SettingsWhpxInfoBar", mainNames);
+
+        var devDrawerBtn = mainDoc.Descendants()
+            .FirstOrDefault(e => e.Attribute(xNs + "Name")?.Value == "ToggleDevDrawerBtn");
+        Assert.NotNull(devDrawerBtn);
+        Assert.Equal("False", devDrawerBtn.Attribute("IsChecked")?.Value);
+
+        Assert.Contains("AccelBadgeBorder", displayNames);
+        Assert.Contains("AccelBadgeIcon", displayNames);
+        Assert.Contains("AccelBadgeText", displayNames);
+        Assert.Contains("StatusFooterText", displayNames);
+        Assert.Contains("MetricsFooterText", displayNames);
+
+        Assert.Contains(mainDoc.Descendants(), e =>
+            e.Name.LocalName == "FontIcon" &&
+            e.Attribute("FontFamily")?.Value == "Segoe Fluent Icons");
+        Assert.Contains(displayDoc.Descendants(), e =>
+            e.Name.LocalName == "FontIcon" &&
+            e.Attribute("FontFamily")?.Value == "Segoe Fluent Icons");
+
+        string[] disallowedEmojis =
+        [
+            "🏠", "🖥", "⚙", "⏱", "🌐", "🔧", "📷", "📋", "💾", "🗑", "🔄", "🚀", "⚡", "▶", "⏸", "⏻"
+        ];
+        foreach (var emoji in disallowedEmojis)
+        {
+            Assert.DoesNotContain(emoji, mainText, StringComparison.Ordinal);
+            Assert.DoesNotContain(emoji, displayText, StringComparison.Ordinal);
+        }
     }
 
     [Fact]

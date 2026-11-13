@@ -7,6 +7,29 @@
             <ResourceDictionary.MergedDictionaries>
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
             </ResourceDictionary.MergedDictionaries>
+
+            <Style x:Key="SidebarNavButtonStyle" TargetType="Button">
+                <Setter Property="Background" Value="Transparent" />
+                <Setter Property="BorderBrush" Value="Transparent" />
+                <Setter Property="BorderThickness" Value="0" />
+                <Setter Property="CornerRadius" Value="6" />
+                <Setter Property="HorizontalAlignment" Value="Stretch" />
+                <Setter Property="HorizontalContentAlignment" Value="Left" />
+                <Setter Property="Padding" Value="14,9" />
+                <Setter Property="MinHeight" Value="38" />
+            </Style>
+
+            <Style x:Key="ToolbarCompactButtonStyle" TargetType="Button">
+                <Setter Property="Padding" Value="10,6" />
+                <Setter Property="MinHeight" Value="32" />
+                <Setter Property="CornerRadius" Value="6" />
+            </Style>
+
+            <Style x:Key="ToolbarCompactToggleStyle" TargetType="ToggleButton">
+                <Setter Property="Padding" Value="10,6" />
+                <Setter Property="MinHeight" Value="32" />
+                <Setter Property="CornerRadius" Value="6" />
+            </Style>
         </ResourceDictionary>
     </Application.Resources>
 </Application>

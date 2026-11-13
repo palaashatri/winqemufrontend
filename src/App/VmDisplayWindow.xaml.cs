@@ -1,8 +1,12 @@
 using System.Runtime.InteropServices.WindowsRuntime;
+using Microsoft.UI.Composition.SystemBackdrops;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
+using Windows.UI;
 using WinQemu.App.ViewModels;
 using WinQemu.Core.Configuration;
 using WinQemu.Core.Lifecycle;
@@ -27,9 +31,20 @@ public sealed partial class VmDisplayWindow : Window
         _card = card;
         _session = session;
 
+        ConfigureBackdropAndTheme();
+
         Title = $"{card.Name} — WinQEMU Display";
-        TitleText.Text = $"{card.Name} ({card.ArchitectureBadge})";
-        AccelBadgeText.Text = session.ActiveAccelerator.ToUpperInvariant();
+        TitleText.Text = $"{card.Name} · {card.ArchitectureBadge}";
+
+        var isWhpx = string.Equals(session.ActiveAccelerator, "whpx", StringComparison.OrdinalIgnoreCase);
+        AccelBadgeText.Text = isWhpx ? "WHPX ACCELERATED" : "TCG EMULATION";
+        AccelBadgeIcon.Glyph = isWhpx ? "\uE945" : "\uE964";
+        AccelBadgeBorder.Background = new SolidColorBrush(isWhpx
+            ? Color.FromArgb(255, 0x23, 0x86, 0x36)
+            : Color.FromArgb(255, 0x1F, 0x6F, 0xEB));
+        AccelBadgeBorder.BorderBrush = new SolidColorBrush(isWhpx
+            ? Color.FromArgb(255, 0x2E, 0xA0, 0x43)
+            : Color.FromArgb(255, 0x38, 0x8B, 0xFD));
 
         try
         {
@@ -38,7 +53,7 @@ public sealed partial class VmDisplayWindow : Window
             {
                 AppWindow.SetIcon(iconPath);
             }
-            AppWindow.Resize(new Windows.Graphics.SizeInt32(1120, 760));
+            AppWindow.Resize(new Windows.Graphics.SizeInt32(1140, 780));
         }
         catch
         {
@@ -47,6 +62,37 @@ public sealed partial class VmDisplayWindow : Window
         Closed += OnWindowClosed;
         Activated += OnWindowActivated;
         _ = ConnectVncAsync();
+    }
+
+    private void ConfigureBackdropAndTheme()
+    {
+        try
+        {
+            if (MicaController.IsSupported())
+            {
+                SystemBackdrop = new MicaBackdrop();
+            }
+            else if (DesktopAcrylicController.IsSupported())
+            {
+                SystemBackdrop = new DesktopAcrylicBackdrop();
+            }
+        }
+        catch
+        {
+        }
+
+        if (App.CurrentMainWindow?.Content is FrameworkElement mainRoot)
+        {
+            RootGrid.RequestedTheme = mainRoot.RequestedTheme;
+        }
+    }
+
+    private void OnRootSizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        var narrow = e.NewSize.Width < 960;
+        Grid.SetRow(DisplayActionsScroller, narrow ? 1 : 0);
+        Grid.SetColumn(DisplayActionsScroller, narrow ? 0 : 1);
+        Grid.SetColumnSpan(DisplayActionsScroller, narrow ? 2 : 1);
     }
 
     private async Task ConnectVncAsync()
@@ -110,13 +156,15 @@ public sealed partial class VmDisplayWindow : Window
             {
                 await _session.ResumeAsync();
                 _card.State = VmState.Running;
-                PauseResumeBtn.Content = "⏸ Pause";
+                PauseResumeIcon.Glyph = "\uE769";
+                PauseResumeText.Text = "Pause";
             }
             else
             {
                 await _session.PauseAsync();
                 _card.State = VmState.Paused;
-                PauseResumeBtn.Content = "▶ Resume";
+                PauseResumeIcon.Glyph = "\uE768";
+                PauseResumeText.Text = "Resume";
             }
         }
         catch
@@ -160,7 +208,8 @@ public sealed partial class VmDisplayWindow : Window
         {
             _isFullscreen = !_isFullscreen;
             AppWindow.SetPresenter(_isFullscreen ? AppWindowPresenterKind.FullScreen : AppWindowPresenterKind.Overlapped);
-            FullscreenBtn.Content = _isFullscreen ? "❐ Exit Fullscreen" : "⛶ Fullscreen";
+            FullscreenIcon.Glyph = _isFullscreen ? "\uE73F" : "\uE740";
+            FullscreenText.Text = _isFullscreen ? "Exit Fullscreen" : "Fullscreen";
         }
         catch
         {

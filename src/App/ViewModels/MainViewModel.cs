@@ -3,6 +3,10 @@ using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using Microsoft.UI;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Media.Imaging;
+using Windows.UI;
 using WinQemu.Core.Configuration;
 using WinQemu.Core.Diagnostics;
 using WinQemu.Core.Lifecycle;
@@ -24,6 +28,28 @@ using WinQemu.Storage;
 
 namespace WinQemu.App.ViewModels;
 
+public sealed record OsDownloadCardItem(
+    string Id,
+    string Name,
+    string Version,
+    string ArchitectureText,
+    string PublisherAndSize,
+    string OfficialSourceUrl,
+    string KindBadgeText);
+
+public sealed class PortForwardRuleItem
+{
+    public PortForwardRuleItem(PortForwardRule rule)
+    {
+        Rule = rule;
+    }
+
+    public PortForwardRule Rule { get; }
+    public string Name => Rule.Name;
+    public string ProtocolBadge => Rule.Protocol.ToUpperInvariant();
+    public string MappingSummary => $"{Rule.HostBindAddress}:{Rule.HostPort} → Guest :{Rule.GuestPort}";
+}
+
 public sealed class VmCardItem : INotifyPropertyChanged
 {
     private VmState _state = VmState.Stopped;
@@ -31,6 +57,7 @@ public sealed class VmCardItem : INotifyPropertyChanged
     private string _statusBadgeText = "Stopped";
     private string _metricsSummary = string.Empty;
     private string? _screenshotPath;
+    private BitmapImage? _cachedThumbnail;
 
     public VmCardItem(VirtualMachine vm)
     {
@@ -44,9 +71,21 @@ public sealed class VmCardItem : INotifyPropertyChanged
     public string Name => Vm.Identity.Name;
     public string OsDisplayName => Vm.GuestProfile.OsDisplayName;
     public string ArchitectureBadge => Vm.Architecture.ToDisplayName();
-    public string IconGlyph => Vm.Metadata.IconGlyph;
+    public string IconGlyph => string.IsNullOrWhiteSpace(Vm.Metadata.IconGlyph) ? "\uE7F4" : Vm.Metadata.IconGlyph;
     public string AccentColorHex => Vm.Metadata.AccentColorHex;
     public string ResourceSummary { get; private set; } = string.Empty;
+
+    public bool UsesWhpxByDefault =>
+        Vm.Architecture == VmArchitecture.X86_64 &&
+        Vm.Accelerator != VmAcceleratorMode.Tcg;
+
+    public bool IsWhpxEffective => IsRunningOrPaused
+        ? string.Equals(ActiveAccelerator, "whpx", StringComparison.OrdinalIgnoreCase)
+        : UsesWhpxByDefault;
+
+    public string AcceleratorBadgeText => IsWhpxEffective ? "WHPX" : "TCG";
+    public Visibility WhpxBadgeVisibility => IsWhpxEffective ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility TcgBadgeVisibility => IsWhpxEffective ? Visibility.Collapsed : Visibility.Visible;
 
     public VmState State
     {
@@ -58,17 +97,24 @@ public sealed class VmCardItem : INotifyPropertyChanged
                 _state = value;
                 StatusBadgeText = value switch
                 {
-                    VmState.Running => $"● Running ({ActiveAccelerator.ToUpperInvariant()})",
-                    VmState.Starting => "◐ Starting...",
-                    VmState.Paused => "⏸ Paused",
-                    VmState.ShuttingDown => "◑ Shutting Down...",
-                    VmState.Stopping => "◑ Stopping...",
-                    VmState.Crashed => "⚠ Crashed",
-                    _ => "○ Stopped"
+                    VmState.Running => "Running",
+                    VmState.Starting => "Starting...",
+                    VmState.Paused => "Paused",
+                    VmState.ShuttingDown => "Shutting Down...",
+                    VmState.Stopping => "Stopping...",
+                    VmState.Crashed => "Crashed",
+                    _ => "Stopped"
                 };
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(IsRunningOrPaused));
                 OnPropertyChanged(nameof(PrimaryActionText));
+                OnPropertyChanged(nameof(PrimaryActionGlyph));
+                OnPropertyChanged(nameof(StatusDotColor));
+                OnPropertyChanged(nameof(UsesWhpxByDefault));
+                OnPropertyChanged(nameof(IsWhpxEffective));
+                OnPropertyChanged(nameof(AcceleratorBadgeText));
+                OnPropertyChanged(nameof(WhpxBadgeVisibility));
+                OnPropertyChanged(nameof(TcgBadgeVisibility));
             }
         }
     }
@@ -83,9 +129,14 @@ public sealed class VmCardItem : INotifyPropertyChanged
                 _activeAccelerator = value;
                 if (State == VmState.Running)
                 {
-                    StatusBadgeText = $"● Running ({value.ToUpperInvariant()})";
+                    StatusBadgeText = "Running";
                 }
                 OnPropertyChanged();
+                OnPropertyChanged(nameof(UsesWhpxByDefault));
+                OnPropertyChanged(nameof(IsWhpxEffective));
+                OnPropertyChanged(nameof(AcceleratorBadgeText));
+                OnPropertyChanged(nameof(WhpxBadgeVisibility));
+                OnPropertyChanged(nameof(TcgBadgeVisibility));
             }
         }
     }
@@ -102,6 +153,14 @@ public sealed class VmCardItem : INotifyPropertyChanged
             }
         }
     }
+
+    public Color StatusDotColor => State switch
+    {
+        VmState.Running => Color.FromArgb(255, 0x3F, 0xB9, 0x50),
+        VmState.Starting or VmState.Paused or VmState.ShuttingDown or VmState.Stopping => Color.FromArgb(255, 0xD2, 0x99, 0x22),
+        VmState.Crashed => Color.FromArgb(255, 0xF8, 0x51, 0x49),
+        _ => Color.FromArgb(255, 0x8B, 0x94, 0x9E)
+    };
 
     public string MetricsSummary
     {
@@ -121,25 +180,49 @@ public sealed class VmCardItem : INotifyPropertyChanged
         get => _screenshotPath;
         set
         {
-            if (_screenshotPath != value)
+            var changed = _screenshotPath != value;
+            _screenshotPath = value;
+            Vm.Metadata.LastScreenshotPath = value;
+            _cachedThumbnail = null;
+            if (changed)
             {
-                _screenshotPath = value;
-                Vm.Metadata.LastScreenshotPath = value;
                 OnPropertyChanged();
-                OnPropertyChanged(nameof(ThumbnailSource));
             }
+            OnPropertyChanged(nameof(HasThumbnail));
+            OnPropertyChanged(nameof(ThumbnailSource));
+            OnPropertyChanged(nameof(PlaceholderVisibility));
+            OnPropertyChanged(nameof(ThumbnailVisibility));
         }
     }
 
-    public Microsoft.UI.Xaml.Media.Imaging.BitmapImage? ThumbnailSource =>
-        !string.IsNullOrWhiteSpace(_screenshotPath) && File.Exists(_screenshotPath)
-            ? new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(Path.GetFullPath(_screenshotPath)))
-            : null;
+    public bool HasThumbnail =>
+        !string.IsNullOrWhiteSpace(_screenshotPath) && File.Exists(_screenshotPath);
+
+    public Visibility PlaceholderVisibility => HasThumbnail ? Visibility.Collapsed : Visibility.Visible;
+    public Visibility ThumbnailVisibility => HasThumbnail ? Visibility.Visible : Visibility.Collapsed;
+
+    public BitmapImage? ThumbnailSource
+    {
+        get
+        {
+            if (!HasThumbnail)
+            {
+                _cachedThumbnail = null;
+                return null;
+            }
+
+            return _cachedThumbnail ??= new BitmapImage(new Uri(Path.GetFullPath(_screenshotPath!)))
+            {
+                CreateOptions = BitmapCreateOptions.IgnoreImageCache
+            };
+        }
+    }
 
     public bool IsRunningOrPaused =>
         State is VmState.Starting or VmState.Running or VmState.Paused or VmState.ShuttingDown;
 
-    public string PrimaryActionText => IsRunningOrPaused ? "Open Console" : "▶ Start";
+    public string PrimaryActionText => IsRunningOrPaused ? "Open Console" : "Start";
+    public string PrimaryActionGlyph => IsRunningOrPaused ? "\uE7F4" : "\uE768";
 
     public void RefreshStaticSummaries()
     {
@@ -152,7 +235,13 @@ public sealed class VmCardItem : INotifyPropertyChanged
         OnPropertyChanged(nameof(Name));
         OnPropertyChanged(nameof(OsDisplayName));
         OnPropertyChanged(nameof(ArchitectureBadge));
+        OnPropertyChanged(nameof(IconGlyph));
         OnPropertyChanged(nameof(ResourceSummary));
+        OnPropertyChanged(nameof(UsesWhpxByDefault));
+        OnPropertyChanged(nameof(IsWhpxEffective));
+        OnPropertyChanged(nameof(AcceleratorBadgeText));
+        OnPropertyChanged(nameof(WhpxBadgeVisibility));
+        OnPropertyChanged(nameof(TcgBadgeVisibility));
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -482,7 +571,7 @@ public sealed class MainViewModel : IAsyncDisposable
                 VmArchitecture.X86_64,
                 "Microsoft Windows [Version 10.0.26100.3194] — Windows 11 Pro (x86_64)",
                 "Windows Emergency Management / Recovery Command Console · Q35 + UEFI + TPM 2.0",
-                "x86_64 (64-bit PC) · WHPX / TCG · AHCI SATA + Intel e1000e Gigabit",
+                "x86_64 (64-bit PC) · WHPX Hardware Accelerated · AHCI SATA + Intel e1000e Gigabit",
                 "PS C:\\Windows\\System32> Get-ComputerInfo | Select OsName, OsArchitecture -> Windows 11 Pro (64-bit)",
                 0x1F, // Classic Windows Blue console
                 false
@@ -518,6 +607,51 @@ public sealed class MainViewModel : IAsyncDisposable
                 string.Equals(v.Name, item.Name, StringComparison.OrdinalIgnoreCase));
             if (existing is not null)
             {
+                if (!existing.IsRunningOrPaused &&
+                    !string.IsNullOrWhiteSpace(existing.Vm.DirectoryPath) &&
+                    existing.Vm.Identity.Tags.Contains("showcase-boot-test", StringComparer.OrdinalIgnoreCase))
+                {
+                    var existingIsoPath = Path.Combine(existing.Vm.DirectoryPath, VmDirectoryLayout.DisksSubdir, "boot-media.iso");
+                    if (File.Exists(existingIsoPath))
+                    {
+                        var isoBytes = await File.ReadAllBytesAsync(existingIsoPath, cancellationToken);
+                        if (isoBytes.AsSpan().IndexOf("WHPX / TCG"u8) >= 0)
+                        {
+                            MultiArchBootImageFactory.CreateBootableElToritoIso(
+                                existingIsoPath,
+                                "WINQEMUBOOT",
+                                item.BannerTitle,
+                                $"{item.Subtitle} [Synthetic Boot Validation Media]",
+                                item.KernelInfo,
+                                item.Prompt,
+                                item.ColorAttr);
+
+                            var qemuImgClient = (RuntimeInfo.QemuImgPath is not null && File.Exists(RuntimeInfo.QemuImgPath))
+                                ? new QemuImgClient(RuntimeInfo.QemuImgPath)
+                                : null;
+                            var snapCatalog = await _snapshotManager.LoadCatalogAsync(existing.Vm, qemuImgClient, cancellationToken);
+                            if (snapCatalog.Snapshots.Count == 0)
+                            {
+                                var existingRawPath = Path.Combine(existing.Vm.DirectoryPath, VmDirectoryLayout.DisksSubdir, "boot-disk.raw");
+                                MultiArchBootImageFactory.CreateBootableHybridDiskImage(
+                                    existingRawPath,
+                                    item.BannerTitle,
+                                    $"{item.Subtitle} [Synthetic Boot Validation Media]",
+                                    item.KernelInfo,
+                                    item.Prompt,
+                                    item.ColorAttr);
+                                var existingDisk = existing.Vm.Storage.FirstOrDefault(d => d.Media == "disk");
+                                if (existingDisk is not null && qemuImgClient is not null &&
+                                    string.Equals(existingDisk.Format, "qcow2", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    await qemuImgClient.ConvertAsync(existingRawPath, existingDisk.Path, "qcow2", cancellationToken: cancellationToken);
+                                    try { File.Delete(existingRawPath); } catch { }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 createdCards.Add(existing);
                 continue;
             }
