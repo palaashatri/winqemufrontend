@@ -1007,19 +1007,19 @@
                 <ScrollViewer x:Name="WizardViewPanel" Visibility="Collapsed">
                     <Border MaxWidth="900"
                             HorizontalAlignment="Stretch"
-                            Padding="24"
+                            Padding="18"
                             CornerRadius="8"
                             Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                             BorderThickness="1">
-                        <StackPanel Spacing="16">
+                        <StackPanel Spacing="10">
                             <StackPanel.ChildrenTransitions>
                                 <TransitionCollection>
                                     <EntranceThemeTransition FromVerticalOffset="10" />
                                 </TransitionCollection>
                             </StackPanel.ChildrenTransitions>
 
-                            <StackPanel Spacing="4">
+                            <StackPanel Spacing="2">
                                 <TextBlock Text="Create a Virtual Machine" Style="{StaticResource SubtitleTextBlockStyle}" />
                                 <TextBlock Text="Pick an installer ISO or choose an operating system preset across x86_64, i386, ARM64, RISC-V 64, or PowerPC 64. WinQEMU configures firmware, storage, networking, and acceleration automatically."
                                            Style="{StaticResource CaptionTextBlockStyle}"
@@ -1028,8 +1028,8 @@
                             </StackPanel>
 
                             <!-- Step 1: ISO Selection & Auto-Recognition (§13, §14) -->
-                            <Border Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
-                                <StackPanel Spacing="10">
+                            <Border Padding="12" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                                <StackPanel Spacing="8">
                                     <StackPanel Orientation="Horizontal" Spacing="8">
                                         <FontIcon FontFamily="Segoe Fluent Icons" Glyph="&#xE958;" FontSize="15" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
                                         <TextBlock Text="1. Installer Media (Optional — or boot from preset)" Style="{StaticResource BodyStrongTextBlockStyle}" />
@@ -1061,13 +1061,13 @@
                             </Border>
 
                             <!-- Step 2: Operating System & Architecture Preset (§15) -->
-                            <Border Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
-                                <StackPanel Spacing="10">
+                            <Border Padding="12" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                                <StackPanel Spacing="8">
                                     <StackPanel Orientation="Horizontal" Spacing="8">
                                         <FontIcon FontFamily="Segoe Fluent Icons" Glyph="&#xE770;" FontSize="15" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
                                         <TextBlock Text="2. Operating System &amp; Architecture Preset" Style="{StaticResource BodyStrongTextBlockStyle}" />
                                     </StackPanel>
-                                    <Grid x:Name="WizardPresetNameGrid" ColumnSpacing="14" RowSpacing="10">
+                                    <Grid x:Name="WizardPresetNameGrid" ColumnSpacing="14" RowSpacing="8">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="*" />
                                             <ColumnDefinition Width="*" />
@@ -1104,13 +1104,13 @@
                             </Border>
 
                             <!-- Step 3: Recommended Resources (§16) -->
-                            <Border Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
-                                <StackPanel Spacing="12">
+                            <Border Padding="12" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                                <StackPanel Spacing="8">
                                     <StackPanel Orientation="Horizontal" Spacing="8">
                                         <FontIcon FontFamily="Segoe Fluent Icons" Glyph="&#xE964;" FontSize="15" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
                                         <TextBlock Text="3. Hardware Resources (Memory, CPU, Disk Size)" Style="{StaticResource BodyStrongTextBlockStyle}" />
                                     </StackPanel>
-                                    <Grid x:Name="WizardResourcesGrid" ColumnSpacing="14" RowSpacing="10">
+                                    <Grid x:Name="WizardResourcesGrid" ColumnSpacing="14" RowSpacing="8">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="*" />
                                             <ColumnDefinition Width="*" />
@@ -1121,15 +1121,15 @@
                                             <RowDefinition Height="Auto" />
                                             <RowDefinition Height="Auto" />
                                         </Grid.RowDefinitions>
-                                        <StackPanel x:Name="WizardRamField" Grid.Row="0" Grid.Column="0" Spacing="4">
+                                        <StackPanel x:Name="WizardRamField" Grid.Row="0" Grid.Column="0" Spacing="2">
                                             <TextBlock x:Name="WizardRamLabel" Text="Memory (MiB) — Recommended: 4096 MiB" Style="{StaticResource CaptionTextBlockStyle}" />
                                             <Slider x:Name="WizardRamSlider" Minimum="256" Maximum="16384" StepFrequency="256" Value="4096" ValueChanged="OnWizardResourceSliderChanged" AutomationProperties.AutomationId="WizardRamSlider" AutomationProperties.Name="Memory Allocation MiB" />
                                         </StackPanel>
-                                        <StackPanel x:Name="WizardCpuField" Grid.Row="0" Grid.Column="1" Spacing="4">
+                                        <StackPanel x:Name="WizardCpuField" Grid.Row="0" Grid.Column="1" Spacing="2">
                                             <TextBlock x:Name="WizardCpuLabel" Text="Virtual CPUs — Recommended: 4" Style="{StaticResource CaptionTextBlockStyle}" />
                                             <Slider x:Name="WizardCpuSlider" Minimum="1" Maximum="16" StepFrequency="1" Value="4" ValueChanged="OnWizardResourceSliderChanged" AutomationProperties.AutomationId="WizardCpuSlider" AutomationProperties.Name="Virtual CPU Cores" />
                                         </StackPanel>
-                                        <StackPanel x:Name="WizardDiskField" Grid.Row="0" Grid.Column="2" Spacing="4">
+                                        <StackPanel x:Name="WizardDiskField" Grid.Row="0" Grid.Column="2" Spacing="2">
                                             <TextBlock x:Name="WizardDiskLabel" Text="Virtual Disk (GiB) — Recommended: 32 GiB" Style="{StaticResource CaptionTextBlockStyle}" />
                                             <Slider x:Name="WizardDiskSlider" Minimum="4" Maximum="256" StepFrequency="4" Value="32" ValueChanged="OnWizardResourceSliderChanged" AutomationProperties.AutomationId="WizardDiskSlider" AutomationProperties.Name="Disk Size GiB" />
                                         </StackPanel>
@@ -1139,12 +1139,12 @@
                             </Border>
 
                             <!-- Step 4: Express Unattended Installation (§37) -->
-                            <Border Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
-                                <StackPanel Spacing="10">
+                            <Border Padding="12" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                                <StackPanel Spacing="8">
                                     <CheckBox x:Name="WizardExpressInstallCheck"
                                               Content="Enable Express Unattended Installation (Cloud-Init / Windows Autounattend seed ISO)"
                                               AutomationProperties.AutomationId="WizardExpressInstallCheck" />
-                                    <Grid x:Name="WizardExpressFieldsGrid" ColumnSpacing="12" RowSpacing="10">
+                                    <Grid x:Name="WizardExpressFieldsGrid" ColumnSpacing="12" RowSpacing="8">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="*" />
                                             <ColumnDefinition Width="*" />
@@ -1768,7 +1768,7 @@
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="Auto" />
                                                 <ColumnDefinition Width="Auto" />
-                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
                                             </Grid.ColumnDefinitions>
                                             <Grid.RowDefinitions>
                                                 <RowDefinition Height="Auto" />

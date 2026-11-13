@@ -58,10 +58,12 @@ public sealed class VmCardItem : INotifyPropertyChanged
     private string _metricsSummary = string.Empty;
     private string? _screenshotPath;
     private BitmapImage? _cachedThumbnail;
+    private bool _hostSupportsWhpx = true;
 
-    public VmCardItem(VirtualMachine vm)
+    public VmCardItem(VirtualMachine vm, bool hostSupportsWhpx = true)
     {
         Vm = vm;
+        _hostSupportsWhpx = hostSupportsWhpx;
         _screenshotPath = vm.Metadata.LastScreenshotPath;
         RefreshStaticSummaries();
     }
@@ -75,7 +77,26 @@ public sealed class VmCardItem : INotifyPropertyChanged
     public string AccentColorHex => Vm.Metadata.AccentColorHex;
     public string ResourceSummary { get; private set; } = string.Empty;
 
+    public bool HostSupportsWhpx
+    {
+        get => _hostSupportsWhpx;
+        set
+        {
+            if (_hostSupportsWhpx != value)
+            {
+                _hostSupportsWhpx = value;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(UsesWhpxByDefault));
+                OnPropertyChanged(nameof(IsWhpxEffective));
+                OnPropertyChanged(nameof(AcceleratorBadgeText));
+                OnPropertyChanged(nameof(WhpxBadgeVisibility));
+                OnPropertyChanged(nameof(TcgBadgeVisibility));
+            }
+        }
+    }
+
     public bool UsesWhpxByDefault =>
+        HostSupportsWhpx &&
         Vm.Architecture == VmArchitecture.X86_64 &&
         Vm.Accelerator != VmAcceleratorMode.Tcg;
 
@@ -280,6 +301,7 @@ public sealed class MainViewModel : IAsyncDisposable
     public AppSettingsStore SettingsStore => _settingsStore;
 
     public bool IsWhpxWorking => WhpxReport?.Status == WhpxAccelerationStatus.Working;
+    private bool EffectiveHostWhpxEnabled => IsWhpxWorking && Settings.PreferWhpxWhenAvailable;
 
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
@@ -317,6 +339,12 @@ public sealed class MainViewModel : IAsyncDisposable
             RuntimeInfo.QemuSystemX86_64Path,
             x64Caps?.Accelerators,
             cancellationToken);
+
+        var hostWhpx = EffectiveHostWhpxEnabled;
+        foreach (var card in AllVms)
+        {
+            card.HostSupportsWhpx = hostWhpx;
+        }
     }
 
     public async Task<QemuRuntimeInfo> InstallManagedQemuRuntimeAsync(
@@ -343,9 +371,10 @@ public sealed class MainViewModel : IAsyncDisposable
         var loaded = await _vmStore.LoadAllFromLibraryAsync(Settings.VmStorageDirectory, cancellationToken);
 
         AllVms.Clear();
+        var hostWhpx = EffectiveHostWhpxEnabled;
         foreach (var vm in loaded)
         {
-            var card = new VmCardItem(vm);
+            var card = new VmCardItem(vm, hostWhpx);
             var activeSession = _processManager.GetSession(vm.Identity.Id);
             if (activeSession is null && !string.IsNullOrWhiteSpace(vm.DirectoryPath))
             {
@@ -483,7 +512,7 @@ public sealed class MainViewModel : IAsyncDisposable
         FirmwareManager.PrepareFirmwareForVm(vm, RuntimeInfo);
 
         await _vmStore.SaveAsync(vm, vmDir, cancellationToken);
-        var card = new VmCardItem(vm);
+        var card = new VmCardItem(vm, EffectiveHostWhpxEnabled);
         AllVms.Insert(0, card);
         ApplyFilter();
         SelectedVm = card;
@@ -571,7 +600,7 @@ public sealed class MainViewModel : IAsyncDisposable
                 VmArchitecture.X86_64,
                 "Microsoft Windows [Version 10.0.26100.3194] — Windows 11 Pro (x86_64)",
                 "Windows Emergency Management / Recovery Command Console · Q35 + UEFI + TPM 2.0",
-                "x86_64 (64-bit PC) · WHPX Hardware Accelerated · AHCI SATA + Intel e1000e Gigabit",
+                "x86_64 (64-bit PC) · Q35 · AHCI SATA + Intel e1000e Gigabit",
                 "PS C:\\Windows\\System32> Get-ComputerInfo | Select OsName, OsArchitecture -> Windows 11 Pro (64-bit)",
                 0x1F, // Classic Windows Blue console
                 false
@@ -601,21 +630,44 @@ public sealed class MainViewModel : IAsyncDisposable
         };
 
         var createdCards = new List<VmCardItem>();
+        var hostWhpxEnabled = EffectiveHostWhpxEnabled;
         foreach (var item in specs)
         {
             var existing = AllVms.FirstOrDefault(v =>
                 string.Equals(v.Name, item.Name, StringComparison.OrdinalIgnoreCase));
+            var useWhpxBanner = item.Arch == VmArchitecture.X86_64 &&
+                                hostWhpxEnabled &&
+                                existing?.Vm.Accelerator != VmAcceleratorMode.Tcg;
+            var hypervisorDescription = useWhpxBanner
+                ? "Windows Hypervisor Platform (WHPX Hardware Accelerated)"
+                : "QEMU TCG Dynamic Binary Translation (Multi-Arch Emulation)";
+
             if (existing is not null)
             {
+                existing.HostSupportsWhpx = hostWhpxEnabled;
+                if (!existing.Vm.Identity.Tags.Contains("showcase-boot-test", StringComparer.OrdinalIgnoreCase))
+                {
+                    existing.Vm.Identity.Tags.Add("showcase-boot-test");
+                    if (!string.IsNullOrWhiteSpace(existing.Vm.DirectoryPath))
+                    {
+                        await _vmStore.SaveAsync(existing.Vm, existing.Vm.DirectoryPath, cancellationToken);
+                    }
+                }
+
                 if (!existing.IsRunningOrPaused &&
-                    !string.IsNullOrWhiteSpace(existing.Vm.DirectoryPath) &&
-                    existing.Vm.Identity.Tags.Contains("showcase-boot-test", StringComparer.OrdinalIgnoreCase))
+                    !string.IsNullOrWhiteSpace(existing.Vm.DirectoryPath))
                 {
                     var existingIsoPath = Path.Combine(existing.Vm.DirectoryPath, VmDirectoryLayout.DisksSubdir, "boot-media.iso");
                     if (File.Exists(existingIsoPath))
                     {
                         var isoBytes = await File.ReadAllBytesAsync(existingIsoPath, cancellationToken);
-                        if (isoBytes.AsSpan().IndexOf("WHPX / TCG"u8) >= 0)
+                        var isoSpan = isoBytes.AsSpan();
+                        var expectedMarker = useWhpxBanner
+                            ? "WHPX Hardware Accelerated"u8
+                            : "QEMU TCG Dynamic Binary Translation"u8;
+                        if (isoSpan.IndexOf("WHPX / TCG"u8) >= 0 ||
+                            isoSpan.IndexOf("QEMU / WinQEMU Frontend Native Runtime"u8) >= 0 ||
+                            isoSpan.IndexOf(expectedMarker) < 0)
                         {
                             MultiArchBootImageFactory.CreateBootableElToritoIso(
                                 existingIsoPath,
@@ -624,7 +676,8 @@ public sealed class MainViewModel : IAsyncDisposable
                                 $"{item.Subtitle} [Synthetic Boot Validation Media]",
                                 item.KernelInfo,
                                 item.Prompt,
-                                item.ColorAttr);
+                                item.ColorAttr,
+                                hypervisorDescription);
 
                             var qemuImgClient = (RuntimeInfo.QemuImgPath is not null && File.Exists(RuntimeInfo.QemuImgPath))
                                 ? new QemuImgClient(RuntimeInfo.QemuImgPath)
@@ -639,7 +692,8 @@ public sealed class MainViewModel : IAsyncDisposable
                                     $"{item.Subtitle} [Synthetic Boot Validation Media]",
                                     item.KernelInfo,
                                     item.Prompt,
-                                    item.ColorAttr);
+                                    item.ColorAttr,
+                                    hypervisorDescription);
                                 var existingDisk = existing.Vm.Storage.FirstOrDefault(d => d.Media == "disk");
                                 if (existingDisk is not null && qemuImgClient is not null &&
                                     string.Equals(existingDisk.Format, "qcow2", StringComparison.OrdinalIgnoreCase))
@@ -670,7 +724,8 @@ public sealed class MainViewModel : IAsyncDisposable
                 $"{item.Subtitle} [Synthetic Boot Validation Media]",
                 item.KernelInfo,
                 item.Prompt,
-                item.ColorAttr);
+                item.ColorAttr,
+                hypervisorDescription);
 
             MultiArchBootImageFactory.CreateBootableElToritoIso(
                 isoPath,
@@ -679,7 +734,8 @@ public sealed class MainViewModel : IAsyncDisposable
                 $"{item.Subtitle} [Synthetic Boot Validation Media]",
                 item.KernelInfo,
                 item.Prompt,
-                item.ColorAttr);
+                item.ColorAttr,
+                hypervisorDescription);
 
             var vm = GuestPresetCatalog.CreateVmFromPreset(
                 preset,
@@ -755,13 +811,24 @@ public sealed class MainViewModel : IAsyncDisposable
             FirmwareManager.PrepareFirmwareForVm(vm, RuntimeInfo);
             await _vmStore.SaveAsync(vm, vmDir, cancellationToken);
 
-            var card = new VmCardItem(vm);
+            var card = new VmCardItem(vm, hostWhpxEnabled);
             AllVms.Add(card);
             createdCards.Add(card);
         }
 
+        var nonShowcase = AllVms.Where(c => !createdCards.Contains(c)).ToList();
+        AllVms.Clear();
+        foreach (var c in createdCards)
+        {
+            AllVms.Add(c);
+        }
+        foreach (var c in nonShowcase)
+        {
+            AllVms.Add(c);
+        }
+
         ApplyFilter();
-        SelectedVm ??= FilteredVms.FirstOrDefault();
+        SelectedVm = createdCards.FirstOrDefault() ?? FilteredVms.FirstOrDefault();
         return createdCards;
     }
 

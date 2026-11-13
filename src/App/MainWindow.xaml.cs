@@ -498,7 +498,7 @@ public sealed partial class MainWindow : Window
             Grid.SetColumn(SettingsEnableWhpxBtn, 0);
             Grid.SetColumnSpan(SettingsEnableWhpxBtn, 3);
         }
-        else if (width < 980 || width >= 1280)
+        else if (width < 980 || width >= 1520)
         {
             Grid.SetRow(SettingsReprobeBtn, 0);
             Grid.SetColumn(SettingsReprobeBtn, 0);
@@ -520,7 +520,7 @@ public sealed partial class MainWindow : Window
             Grid.SetColumnSpan(InstallManagedQemuBtn, 1);
             Grid.SetRow(SettingsEnableWhpxBtn, 1);
             Grid.SetColumn(SettingsEnableWhpxBtn, 0);
-            Grid.SetColumnSpan(SettingsEnableWhpxBtn, 1);
+            Grid.SetColumnSpan(SettingsEnableWhpxBtn, 2);
         }
     }
 
@@ -774,9 +774,7 @@ public sealed partial class MainWindow : Window
 
     private void UpdateConsoleToolbarForSelectedVm(VmCardItem card)
     {
-        var isWhpxActive = card.IsRunningOrPaused
-            ? string.Equals(card.ActiveAccelerator, "whpx", StringComparison.OrdinalIgnoreCase)
-            : card.UsesWhpxByDefault && _viewModel.IsWhpxWorking;
+        var isWhpxActive = card.IsWhpxEffective;
 
         var compactBadge = MainRootGrid.ActualWidth > 0 && MainRootGrid.ActualWidth < 680;
         if (isWhpxActive)
@@ -2412,21 +2410,17 @@ public sealed partial class MainWindow : Window
             }
             catch { }
         }
+        finally
+        {
+            _allowCloseConfirmed = true;
+            Close();
+        }
     }
 
     private async Task BootAndCaptureAllShowcaseVmsAsync(string outputDir)
     {
         Directory.CreateDirectory(outputDir);
-        var cards = _viewModel.AllVms
-            .Where(c => c.Vm.Identity.Tags.Contains("showcase-boot-test", StringComparer.OrdinalIgnoreCase))
-            .ToList();
-        if (cards.Count == 0)
-        {
-            await _viewModel.ProvisionMultiArchShowcaseVmsAsync();
-            cards = _viewModel.AllVms
-                .Where(c => c.Vm.Identity.Tags.Contains("showcase-boot-test", StringComparer.OrdinalIgnoreCase))
-                .ToList();
-        }
+        var cards = (await _viewModel.ProvisionMultiArchShowcaseVmsAsync()).ToList();
 
         var previousDrawerOpen = ToggleDevDrawerBtn.IsChecked == true;
         SetDevDrawerOpen(true);
