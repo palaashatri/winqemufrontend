@@ -263,4 +263,86 @@ public sealed class RealQemuIntegrationTests
             try { Directory.Delete(testRoot, recursive: true); } catch { }
         }
     }
+
+    [RequiresQemuFact(requireX86_64: true, requireQemuImg: false)]
+    public async Task RealQemu_InteractiveX86VncKeyboard_EchoesToSerialCom1Test()
+    {
+        var runtime = QemuRuntimeLocator.Discover();
+        Assert.True(runtime.IsAvailable && runtime.QemuSystemX86_64Path is not null);
+
+        var testRoot = Path.Combine(Path.GetTempPath(), $"winqemu-vnc-kbd-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(testRoot);
+
+        try
+        {
+            var isoPath = Path.Combine(testRoot, "interactive-boot.iso");
+            MultiArchBootImageFactory.CreateBootableElToritoIso(
+                isoPath,
+                "INTERACTIVE_KBD",
+                "Ubuntu Linux 24.04 LTS (Interactive Console)",
+                "WinQEMU VNC Keyboard -> COM1 Verification Guest",
+                "x86_64 · BIOS Interactive Console",
+                "guest@winqemu:~$ ");
+
+            var preset = GuestPresetCatalog.GetByIdOrDefault("ubuntu");
+            var vm = GuestPresetCatalog.CreateVmFromPreset(
+                preset,
+                "Interactive Kbd Test",
+                testRoot,
+                isoPath,
+                customMemoryMiB: 256,
+                customVcpus: 1,
+                customDiskGiB: 1);
+
+            vm.Accelerator = VmAcceleratorMode.Tcg;
+            vm.Firmware.FirmwareType = VmFirmwareType.Bios;
+            vm.Developer.EnableSerialConsole = true;
+            vm.Graphics.Transport = VmDisplayTransport.VncEmbedded;
+            vm.Storage.RemoveAll(d => d.Media == "disk");
+
+            var endpoints = QemuCommandBuilder.AllocateLocalEndpoints(vm);
+            var spec = QemuCommandBuilder.Build(vm, runtime.QemuSystemX86_64Path, capabilities: null, isWhpxWorking: false, endpoints);
+
+            await using var procManager = new QemuProcessManager();
+            var session = await procManager.StartVmAsync(vm, spec);
+            Assert.Equal(VmState.Running, session.StateMachine.State);
+
+            await using var vnc = new RfbVncClient();
+            await vnc.ConnectLocalhostAsync(endpoints.VncPort!.Value);
+
+            var readyDeadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(12);
+            while (DateTimeOffset.UtcNow < readyDeadline &&
+                   !session.GetSerialConsoleHistory().Contains("guest@winqemu:~$ ", StringComparison.Ordinal))
+            {
+                await Task.Delay(100);
+            }
+
+            Assert.Contains("INTERACTIVE CONSOLE READY", session.GetSerialConsoleHistory(), StringComparison.Ordinal);
+
+            // Send "hello" + Enter via RFB VNC key events (SendAsciiTextAsync maps '\n' -> XK_Return)
+            await vnc.SendAsciiTextAsync("hello\r\n");
+
+            var echoDeadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(6);
+            while (DateTimeOffset.UtcNow < echoDeadline)
+            {
+                var serialNow = session.GetSerialConsoleHistory();
+                if (serialNow.Contains("hello\r\n> ", StringComparison.Ordinal))
+                {
+                    break;
+                }
+                await Task.Delay(100);
+            }
+
+            var serialOutput = session.GetSerialConsoleHistory();
+            Assert.Contains("hello", serialOutput, StringComparison.Ordinal);
+            Assert.Contains("hello\r\n> ", serialOutput, StringComparison.Ordinal);
+
+            await session.ForceStopAsync();
+            Assert.Equal(VmState.Stopped, session.StateMachine.State);
+        }
+        finally
+        {
+            try { Directory.Delete(testRoot, recursive: true); } catch { }
+        }
+    }
 }

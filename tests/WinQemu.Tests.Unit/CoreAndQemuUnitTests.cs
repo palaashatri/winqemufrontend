@@ -592,4 +592,104 @@ public sealed class CoreAndQemuUnitTests
         var remediation = ErrorTranslator.Translate("whpx: initialization error: hypervisor feature not present");
         Assert.Equal(ErrorRecoveryActionKind.EnableWhpxElevated, remediation.PrimaryAction);
     }
+
+    [Fact]
+    public void RfbVncClient_MapsNumpadShiftAndCapsLockKeysymsCorrectly()
+    {
+        // CapsLock (VK_CAPITAL = 0x14 -> XK_Caps_Lock 0xFFE5)
+        Assert.Equal(0xFFE5u, RfbVncClient.MapWindowsVirtualKeyToX11Keysym(0x14));
+
+        // Numpad digits 0..9 (0x60..0x69) and operators
+        for (var i = 0; i <= 9; i++)
+        {
+            Assert.Equal((uint)('0' + i), RfbVncClient.MapWindowsVirtualKeyToX11Keysym(0x60 + i));
+        }
+        Assert.Equal((uint)'*', RfbVncClient.MapWindowsVirtualKeyToX11Keysym(0x6A));
+        Assert.Equal((uint)'+', RfbVncClient.MapWindowsVirtualKeyToX11Keysym(0x6B));
+        Assert.Equal((uint)'-', RfbVncClient.MapWindowsVirtualKeyToX11Keysym(0x6D));
+        Assert.Equal((uint)'.', RfbVncClient.MapWindowsVirtualKeyToX11Keysym(0x6E));
+        Assert.Equal((uint)'/', RfbVncClient.MapWindowsVirtualKeyToX11Keysym(0x6F));
+
+        // Shift handling for letters, digits, and OEM punctuation
+        Assert.Equal((uint)'a', RfbVncClient.MapWindowsVirtualKeyToX11Keysym(0x41, shiftPressed: false));
+        Assert.Equal((uint)'A', RfbVncClient.MapWindowsVirtualKeyToX11Keysym(0x41, shiftPressed: true));
+        Assert.Equal((uint)'1', RfbVncClient.MapWindowsVirtualKeyToX11Keysym(0x31, shiftPressed: false));
+        Assert.Equal((uint)'!', RfbVncClient.MapWindowsVirtualKeyToX11Keysym(0x31, shiftPressed: true));
+        Assert.Equal((uint)';', RfbVncClient.MapWindowsVirtualKeyToX11Keysym(0xBA, shiftPressed: false));
+        Assert.Equal((uint)':', RfbVncClient.MapWindowsVirtualKeyToX11Keysym(0xBA, shiftPressed: true));
+        Assert.Equal((uint)'/', RfbVncClient.MapWindowsVirtualKeyToX11Keysym(0xBF, shiftPressed: false));
+        Assert.Equal((uint)'?', RfbVncClient.MapWindowsVirtualKeyToX11Keysym(0xBF, shiftPressed: true));
+    }
+
+    [Fact]
+    public void CommandBuilder_Mac99OmitsXhciAndExtraUsbKbdMouseToPreserveOpenBiosInput()
+    {
+        var preset = GuestPresetCatalog.GetByIdOrDefault("macos-ppc64");
+        var vm = GuestPresetCatalog.CreateVmFromPreset(preset, "PPC64 Mac99", @"C:\VMs\Mac99");
+        vm.Input.EnableUsbKeyboard = true;
+        vm.Input.EnableUsbMouse = true;
+        vm.Input.EnableUsbTablet = true;
+
+        var endpoints = new QemuRuntimeEndpoints(45030, 5925, 45031, null, null);
+        var spec = QemuCommandBuilder.Build(
+            vm,
+            @"C:\qemu\qemu-system-ppc64.exe",
+            capabilities: null,
+            isWhpxWorking: false,
+            endpoints: endpoints);
+
+        Assert.DoesNotContain(spec.ArgumentList, a => a.Contains("qemu-xhci", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(spec.ArgumentList, a => a.Contains("usb-kbd", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(spec.ArgumentList, a => a.Contains("usb-mouse", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains("usb-tablet,id=input-tablet0", spec.ArgumentList);
+    }
+
+    [Fact]
+    public void MultiArchBootImageFactory_InteractiveBootloaderFitsSector0AndEmbedsReadyMarker()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"winqemu-interactive-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var rawPath = Path.Combine(tempDir, "interactive.raw");
+            MultiArchBootImageFactory.CreateBootableHybridDiskImage(
+                rawPath,
+                "Test OS",
+                "1.0",
+                "x86_64",
+                "boot>");
+
+            var rawBytes = File.ReadAllBytes(rawPath);
+            // Sector 0 bootloader lives at 0x3E..0x1FD (448 bytes max) followed by 0x55 0xAA at 510..511
+            Assert.Equal(0x55, rawBytes[510]);
+            Assert.Equal(0xAA, rawBytes[511]);
+            // Verify INT 16h (CD 16) interactive keyboard loop opcode sits strictly inside the 448-byte Sector 0 region
+            ReadOnlySpan<byte> int16Opcode = [0xCD, 0x16];
+            Assert.True(rawBytes.AsSpan(0x3E, 448).IndexOf(int16Opcode) >= 0);
+
+            var rawText = Encoding.ASCII.GetString(rawBytes);
+            Assert.Contains("SYSTEM BOOT COMPLETE - INTERACTIVE CONSOLE READY", rawText, StringComparison.Ordinal);
+            Assert.Contains("[Interactive UEFI Shell", rawText, StringComparison.Ordinal);
+
+            var isoPath = Path.Combine(tempDir, "interactive.iso");
+            MultiArchBootImageFactory.CreateBootableElToritoIso(
+                isoPath,
+                "INTERACTIVE",
+                "Test OS",
+                "1.0",
+                "x86_64",
+                "boot>");
+
+            var isoText = Encoding.ASCII.GetString(File.ReadAllBytes(isoPath));
+            Assert.Contains("SYSTEM BOOT COMPLETE - INTERACTIVE CONSOLE READY", isoText, StringComparison.Ordinal);
+            Assert.Contains("[Interactive UEFI Shell", isoText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                Directory.Delete(tempDir, recursive: true);
+            }
+        }
+    }
 }
