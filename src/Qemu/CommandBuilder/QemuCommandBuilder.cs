@@ -178,8 +178,17 @@ public static class QemuCommandBuilder
         }
 
         // 8. USB Controller & Input (§31, §35)
+        var isMac99 = vm.Architecture == VmArchitecture.Ppc64 ||
+            string.Equals(machineType, "mac99", StringComparison.OrdinalIgnoreCase);
         var hasUsbController = false;
-        if (!string.IsNullOrWhiteSpace(vm.Usb.ControllerModel) &&
+        if (isMac99)
+        {
+            // Apple mac99 includes a built-in pci-ohci controller with QEMU USB Keyboard (Port 1) and Mouse (Port 2)
+            // that OpenBIOS polls natively; adding qemu-xhci or a second usb-kbd/usb-mouse moves input behind a hub
+            // where OpenBIOS ignores it and starves the built-in Port 1/2 HID devices.
+            hasUsbController = true;
+        }
+        else if (!string.IsNullOrWhiteSpace(vm.Usb.ControllerModel) &&
             !string.Equals(vm.Usb.ControllerModel, "none", StringComparison.OrdinalIgnoreCase) &&
             (capabilities is null || capabilities.SupportsDevice(vm.Usb.ControllerModel)))
         {
@@ -200,12 +209,12 @@ public static class QemuCommandBuilder
                 args.Add("-device");
                 args.Add("usb-tablet,id=input-tablet0");
             }
-            if (vm.Input.EnableUsbKeyboard && (capabilities is null || capabilities.SupportsDevice("usb-kbd")))
+            if (!isMac99 && vm.Input.EnableUsbKeyboard && (capabilities is null || capabilities.SupportsDevice("usb-kbd")))
             {
                 args.Add("-device");
                 args.Add("usb-kbd,id=input-kbd0");
             }
-            if (vm.Input.EnableUsbMouse && (capabilities is null || capabilities.SupportsDevice("usb-mouse")))
+            if (!isMac99 && vm.Input.EnableUsbMouse && (capabilities is null || capabilities.SupportsDevice("usb-mouse")))
             {
                 args.Add("-device");
                 args.Add("usb-mouse,id=input-mouse0");

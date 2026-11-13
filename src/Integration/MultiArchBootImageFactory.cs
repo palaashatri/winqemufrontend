@@ -32,7 +32,7 @@ public static class MultiArchBootImageFactory
         //   1. Sets 80x25 16-color VGA text mode (int 10h, ax=0003h)
         //   2. Clears the screen with `vgaColorAttr`
         //   3. Renders the OS boot banner + kernel/arch status lines to VGA 0xB8000 AND COM1 (0x3F8)
-        //   4. Loops cleanly on `hlt`
+        //   4. Runs an interactive 16-bit keyboard + VGA text + COM1 serial console loop
         // AND because the disk is a valid FAT16 volume with `\startup.nsh` in its root directory,
         // when booted under EDK2 UEFI on x86_64, aarch64, or riscv64, the UEFI GOP Graphical Console
         // automatically executes `\startup.nsh` and renders the exact same OS boot screen on the
@@ -63,7 +63,7 @@ public static class MultiArchBootImageFactory
             $"  Hypervisor   : {effectiveHypervisor}",
             "  Display      : Localhost VNC Framebuffer + Serial Console (Active)",
             "  Network      : VirtIO / Intel e1000e User-Mode NAT (10.0.2.15/24)",
-            "  Status       : SYSTEM BOOT COMPLETE - KERNEL & INIT ACTIVE",
+            "  Status       : SYSTEM BOOT COMPLETE - INTERACTIVE CONSOLE READY",
             "",
             $"  {ToCleanAscii(promptLine)}"
         };
@@ -103,6 +103,10 @@ public static class MultiArchBootImageFactory
 
         // Assemble x86 16-bit bootloader at offset 0x3E
         var code = AssembleX86Bootloader(vgaColorAttr);
+        if (code.Length > 448)
+        {
+            throw new InvalidOperationException($"Bootloader code length {code.Length} exceeds 448-byte Sector 0 limit.");
+        }
         code.CopyTo(vbr.Slice(0x3E, code.Length));
         vbr[510] = 0x55;
         vbr[511] = 0xAA;
@@ -139,6 +143,7 @@ public static class MultiArchBootImageFactory
                 nshBuilder.AppendLine($"echo \"{line}\"");
             }
         }
+        nshBuilder.AppendLine("echo \"  [Interactive UEFI Shell -- Type 'help', 'ver', 'pci', 'memmap', or 'cls']\"");
         var nshBytes = Encoding.ASCII.GetBytes(nshBuilder.ToString());
 
         var rootDirOffset = (reservedSectors + fatCount * sectorsPerFat) * bytesPerSector;
@@ -185,7 +190,7 @@ public static class MultiArchBootImageFactory
 
             var effectiveHypervisor = ToCleanAscii(hypervisorDescription ?? "QEMU / WinQEMU Frontend Native Runtime");
             var nshContent = Encoding.ASCII.GetBytes(
-                $"@echo -off\r\ncls\r\necho \"{ToCleanAscii(osBannerTitle)}\"\r\necho \"{ToCleanAscii(osVersionSubtitle)}\"\r\necho \"{ToCleanAscii(kernelAndArchInfo)}\"\r\necho \"  Hypervisor   : {effectiveHypervisor}\"\r\necho \"{ToCleanAscii(promptLine)}\"\r\n");
+                $"@echo -off\r\ncls\r\necho \"{ToCleanAscii(osBannerTitle)}\"\r\necho \"{ToCleanAscii(osVersionSubtitle)}\"\r\necho \"{ToCleanAscii(kernelAndArchInfo)}\"\r\necho \"  Hypervisor   : {effectiveHypervisor}\"\r\necho \"  Status       : SYSTEM BOOT COMPLETE - INTERACTIVE CONSOLE READY\"\r\necho \"{ToCleanAscii(promptLine)}\"\r\necho \"  [Interactive UEFI Shell -- Type 'help', 'ver', 'pci', 'memmap', or 'cls']\"\r\n");
 
             Iso9660Builder.CreateDataIso(
                 outputIsoPath,
@@ -210,7 +215,9 @@ public static class MultiArchBootImageFactory
         //   Set VGA 80x25 text mode (INT 10h AX=0003h)
         //   Fill 0xB800:0000 (2000 chars) with (' ', colorAttr)
         //   Print banner string at 0x7E00 to VGA memory AND COM1 (0x3F8)
-        //   Loop forever on hlt
+        //   Run interactive keyboard (INT 16h) + VGA text + COM1 console loop
+        // NOTE: Keep total length <= 448 bytes (0x3E..0x1FD) and keep offsets 0..27 unchanged
+        // because PatchBootloaderForMemoryResidentBanner NOPs the 15-byte INT 13h read at 0x3E + 13.
         return
         [
             0xFA,                         // cli
@@ -220,14 +227,14 @@ public static class MultiArchBootImageFactory
             0x8E, 0xD0,                   // mov ss, ax
             0xBC, 0x00, 0x7C,             // mov sp, 0x7C00
             0xFB,                         // sti
-            // Read sector 2..3 into 0x7E00:
+            // Read sector 2..3 into 0x7E00 (offsets 13..27):
             0xB8, 0x02, 0x02,             // mov ax, 0x0202 (AH=02 read, AL=2 sectors)
             0xBB, 0x00, 0x7E,             // mov bx, 0x7E00
             0xB9, 0x02, 0x00,             // mov cx, 0x0002 (Cylinder 0, Sector 2)
             0x31, 0xD2,                   // xor dx, dx
             0xB2, 0x80,                   // mov dl, 0x80 (HDD 0)
             0xCD, 0x13,                   // int 0x13
-            // Set video mode 3:
+            // Set video mode 3 (offset 28):
             0xB8, 0x03, 0x00,             // mov ax, 0x0003
             0xCD, 0x10,                   // int 0x10
             // Clear screen at B800:0000 with colorAttr:
@@ -242,19 +249,19 @@ public static class MultiArchBootImageFactory
             // Render text from DS:SI (0x7E00) to ES:DI (row 1 = 160) and COM1 (0x3F8)
             0xBE, 0x00, 0x7E,             // mov si, 0x7E00
             0xBF, 0xA0, 0x00,             // mov di, 160
-            // .loop (offset 0):
+            // .loop (offset 56):
             0xAC,                         // lodsb
             0x84, 0xC0,                   // test al, al
-            0x74, 0x21,                   // jz .done (+33 -> offset 38)
+            0x74, 0x21,                   // jz .done (+33 -> offset 94)
             // Output to COM1 (0x3F8):
             0x50,                         // push ax
             0xBA, 0xF8, 0x03,             // mov dx, 0x03F8
             0xEE,                         // out dx, al
             0x58,                         // pop ax
             0x3C, 0x0D,                   // cmp al, '\r'
-            0x74, 0xF1,                   // je .loop (-15 -> offset 0)
+            0x74, 0xF1,                   // je .loop (-15 -> offset 56)
             0x3C, 0x0A,                   // cmp al, '\n'
-            0x75, 0x0E,                   // jne .putc (+14 -> offset 33)
+            0x75, 0x0E,                   // jne .putc (+14 -> offset 89)
             // newline: di = ((di / 160) + 1) * 160
             0x89, 0xF8,                   // mov ax, di
             0xB3, 0xA0,                   // mov bl, 160
@@ -262,14 +269,99 @@ public static class MultiArchBootImageFactory
             0xFE, 0xC0,                   // inc al
             0xF6, 0xE3,                   // mul bl
             0x89, 0xC7,                   // mov di, ax
-            0xEB, 0xDF,                   // jmp .loop (-33 -> offset 0)
-            // .putc (offset 33):
+            0xEB, 0xDF,                   // jmp .loop (-33 -> offset 56)
+            // .putc (offset 89):
             0xB4, colorAttr,              // mov ah, colorAttr
             0xAB,                         // stosw
-            0xEB, 0xDA,                   // jmp .loop (-38 -> offset 0)
-            // .done (offset 38):
-            0xF4,                         // hlt
-            0xEB, 0xFD                    // jmp .done (-3)
+            0xEB, 0xDA,                   // jmp .loop (-38 -> offset 56)
+
+            // .done / .cursor_loop (offset 94):
+            0xE8, 0x81, 0x00,             // call .scroll_if_needed (+129 -> offset 226)
+            0x89, 0xF8,                   // mov ax, di
+            0xB3, 0xA0,                   // mov bl, 160
+            0xF6, 0xF3,                   // div bl              (AL = DI/160, AH = DI%160)
+            0x88, 0xC6,                   // mov dh, al          (DH = row)
+            0xD0, 0xEC,                   // shr ah, 1           (AH = (DI%160)/2)
+            0x88, 0xE2,                   // mov dl, ah          (DL = col)
+            0x30, 0xFF,                   // xor bh, bh          (BH = page 0)
+            0xB4, 0x02,                   // mov ah, 0x02        (INT 10h AH=02h set cursor)
+            0xCD, 0x10,                   // int 0x10
+
+            // .wait_key (offset 115):
+            0x30, 0xE4,                   // xor ah, ah          (INT 16h AH=00h wait key)
+            0xCD, 0x16,                   // int 0x16
+            0x3C, 0x08,                   // cmp al, 0x08        (Backspace)
+            0x74, 0x11,                   // je .handle_bs       (+17 -> offset 140)
+            0x3C, 0x0D,                   // cmp al, 0x0D        (Enter)
+            0x74, 0x31,                   // je .handle_enter    (+49 -> offset 176)
+            0x3C, 0x20,                   // cmp al, 0x20        (Space)
+            0x72, 0xF0,                   // jb .wait_key        (-16 -> offset 115)
+            0x3C, 0x7F,                   // cmp al, 0x7F        (DEL)
+            0x73, 0xEC,                   // jae .wait_key       (-20 -> offset 115)
+            0xE8, 0x4B, 0x00,             // call .put_char_both (+75 -> offset 213)
+            0xEB, 0xD2,                   // jmp .cursor_loop    (-46 -> offset 94)
+
+            // .handle_bs (offset 140):
+            0x89, 0xF8,                   // mov ax, di
+            0xB3, 0xA0,                   // mov bl, 160
+            0xF6, 0xF3,                   // div bl              (AH = DI%160)
+            0x80, 0xFC, 0x02,             // cmp ah, 2
+            0x72, 0xDC,                   // jb .wait_key        (-36 -> offset 115)
+            0x83, 0xEF, 0x02,             // sub di, 2
+            0x26, 0xC7, 0x05, 0x20, colorAttr, // mov word es:[di], (colorAttr<<8)|' '
+            0xB0, 0x08,                   // mov al, '\b'
+            0xE8, 0x39, 0x00,             // call .putc_com1     (+57 -> offset 221)
+            0xB0, 0x20,                   // mov al, ' '
+            0xE8, 0x34, 0x00,             // call .putc_com1     (+52 -> offset 221)
+            0xB0, 0x08,                   // mov al, '\b'
+            0xE8, 0x2F, 0x00,             // call .putc_com1     (+47 -> offset 221)
+            0xEB, 0xAE,                   // jmp .cursor_loop    (-82 -> offset 94)
+
+            // .handle_enter (offset 176):
+            0xB0, 0x0D,                   // mov al, '\r'
+            0xE8, 0x28, 0x00,             // call .putc_com1     (+40 -> offset 221)
+            0xB0, 0x0A,                   // mov al, '\n'
+            0xE8, 0x23, 0x00,             // call .putc_com1     (+35 -> offset 221)
+            0x89, 0xF8,                   // mov ax, di
+            0xB3, 0xA0,                   // mov bl, 160
+            0xF6, 0xF3,                   // div bl              (AL = DI/160)
+            0xFE, 0xC0,                   // inc al
+            0xF6, 0xE3,                   // mul bl              (AX = ((DI/160)+1)*160)
+            0x89, 0xC7,                   // mov di, ax
+            0xE8, 0x19, 0x00,             // call .scroll_if_needed (+25 -> offset 226)
+            0xB0, 0x3E,                   // mov al, '>'
+            0xE8, 0x07, 0x00,             // call .put_char_both (+7 -> offset 213)
+            0xB0, 0x20,                   // mov al, ' '
+            0xE8, 0x02, 0x00,             // call .put_char_both (+2 -> offset 213)
+            0xEB, 0x89,                   // jmp .cursor_loop    (-119 -> offset 94)
+
+            // .put_char_both (offset 213):
+            0xE8, 0x05, 0x00,             // call .putc_com1     (+5 -> offset 221)
+            0xFC,                         // cld
+            0xB4, colorAttr,              // mov ah, colorAttr
+            0xAB,                         // stosw
+            0xC3,                         // ret
+
+            // .putc_com1 (offset 221):
+            0xBA, 0xF8, 0x03,             // mov dx, 0x03F8
+            0xEE,                         // out dx, al
+            0xC3,                         // ret
+
+            // .scroll_if_needed (offset 226):
+            0x81, 0xFF, 0xA0, 0x0F,       // cmp di, 4000
+            0x72, 0x13,                   // jb .scroll_done     (+19 -> offset 251)
+            0x1E,                         // push ds
+            0x06,                         // push es
+            0xB8, 0x01, 0x06,             // mov ax, 0x0601      (scroll up 1 line)
+            0xB7, colorAttr,              // mov bh, colorAttr
+            0x31, 0xC9,                   // xor cx, cx          (CX = 0000h)
+            0xBA, 0x4F, 0x18,             // mov dx, 0x184F      (DX = 184Fh)
+            0xCD, 0x10,                   // int 0x10
+            0x07,                         // pop es
+            0x1F,                         // pop ds
+            0xBF, 0x00, 0x0F,             // mov di, 3840
+            // .scroll_done (offset 251):
+            0xC3                          // ret
         ];
     }
 
