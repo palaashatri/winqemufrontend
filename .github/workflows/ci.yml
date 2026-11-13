@@ -5,6 +5,10 @@ on:
     branches: [ main, "agent/**", "comprehensive_visual_qa_pr" ]
   pull_request:
     branches: [ main ]
+  schedule:
+    # Nightly build & binary packaging at 02:00 UTC
+    - cron: "0 2 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -40,3 +44,37 @@ jobs:
 
       - name: Run Real-QEMU Integration Suite (if QEMU present)
         run: dotnet test tests/WinQemu.Tests.QemuIntegration/WinQemu.Tests.QemuIntegration.csproj --configuration Release --no-build --verbosity normal
+
+      - name: Publish Standalone Release Binaries (win-x64)
+        shell: pwsh
+        run: |
+          dotnet publish src/App/WinQemu.App.csproj -c Release -r win-x64 -p:Platform=x64 --self-contained true -o artifacts/win-x64
+          Copy-Item THIRD_PARTY_NOTICES.md, README.md artifacts/win-x64/ -Force
+          Compress-Archive -Path "artifacts/win-x64/*" -DestinationPath "artifacts/WinQemu-win-x64.zip" -Force
+
+      - name: Publish Standalone Release Binaries (win-arm64)
+        shell: pwsh
+        run: |
+          dotnet publish src/App/WinQemu.App.csproj -c Release -r win-arm64 -p:Platform=ARM64 --self-contained true -o artifacts/win-arm64
+          Copy-Item THIRD_PARTY_NOTICES.md, README.md artifacts/win-arm64/ -Force
+          Compress-Archive -Path "artifacts/win-arm64/*" -DestinationPath "artifacts/WinQemu-win-arm64.zip" -Force
+
+      - name: Generate SHA-256 Checksums
+        shell: pwsh
+        run: |
+          $lines = Get-ChildItem artifacts/*.zip | Sort-Object Name | ForEach-Object {
+            $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$h  $($_.Name)"
+          }
+          $lines | Set-Content -Path "artifacts/SHA256SUMS.txt" -Encoding UTF8
+
+      - name: Upload Windows Binary Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: WinQemu-Windows-Binaries
+          path: |
+            artifacts/WinQemu-win-x64.zip
+            artifacts/WinQemu-win-arm64.zip
+            artifacts/SHA256SUMS.txt
+          retention-days: 30
+          if-no-files-found: error

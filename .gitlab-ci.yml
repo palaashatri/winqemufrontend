@@ -1,0 +1,92 @@
+# GitLab CI/CD pipeline for WinQEMU (Windows PowerShell runner + scheduled Nightly builds)
+# Configure a scheduled pipeline in GitLab -> Build -> Pipeline schedules (e.g., cron: 0 2 * * *)
+# with target branch `main` to produce nightly signed/hashed WinQEMU ZIP artifacts.
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+stages:
+  - build
+  - test
+  - package
+
+.dotnet_windows_template:
+  tags:
+    - windows
+  before_script:
+    - |
+      $ErrorActionPreference = "Stop"
+      $hasNet10 = $false
+      if (Get-Command dotnet -ErrorAction SilentlyContinue) {
+        $sdks = & dotnet --list-sdks 2>$null
+        if ($sdks -match '^10\.') { $hasNet10 = $true }
+      }
+      if (-not $hasNet10) {
+        $localDotnet = Join-Path $CI_PROJECT_DIR ".dotnet"
+        New-Item -ItemType Directory -Path $localDotnet -Force | Out-Null
+        $installScript = Join-Path $localDotnet "dotnet-install.ps1"
+        Invoke-WebRequest -Uri "https://dot.net/v1/dotnet-install.ps1" -OutFile $installScript
+        & $installScript -Channel "10.0" -InstallDir $localDotnet
+        $env:DOTNET_ROOT = $localDotnet
+        $env:PATH = "$localDotnet;$env:PATH"
+      }
+      & dotnet --info
+
+build:windows:
+  extends: .dotnet_windows_template
+  stage: build
+  script:
+    - dotnet restore WinQemu.sln
+    - dotnet build WinQemu.sln --configuration Release --no-restore
+
+test:windows:
+  extends: .dotnet_windows_template
+  stage: test
+  needs:
+    - build:windows
+  script:
+    - dotnet restore WinQemu.sln
+    - dotnet build WinQemu.sln --configuration Release --no-restore
+    - dotnet test tests/WinQemu.Tests.Unit/WinQemu.Tests.Unit.csproj --configuration Release --no-build --verbosity normal
+    - dotnet test tests/WinQemu.Tests.FakeQmp/WinQemu.Tests.FakeQmp.csproj --configuration Release --no-build --verbosity normal
+    - dotnet test tests/WinQemu.Tests.UiAutomation/WinQemu.Tests.UiAutomation.csproj --configuration Release --no-build --verbosity normal
+    - dotnet test tests/WinQemu.Tests.QemuIntegration/WinQemu.Tests.QemuIntegration.csproj --configuration Release --no-build --verbosity normal
+
+package:binaries:
+  extends: .dotnet_windows_template
+  stage: package
+  needs:
+    - test:windows
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - if: '$CI_COMMIT_BRANCH'
+    - if: '$CI_COMMIT_TAG'
+  script:
+    - |
+      New-Item -ItemType Directory -Path "artifacts" -Force | Out-Null
+      dotnet publish src/App/WinQemu.App.csproj -c Release -r win-x64 -p:Platform=x64 --self-contained true -o artifacts/win-x64
+      Copy-Item THIRD_PARTY_NOTICES.md, README.md artifacts/win-x64/ -Force
+      Compress-Archive -Path "artifacts/win-x64/*" -DestinationPath "artifacts/WinQemu-win-x64.zip" -Force
+
+      dotnet publish src/App/WinQemu.App.csproj -c Release -r win-arm64 -p:Platform=ARM64 --self-contained true -o artifacts/win-arm64
+      Copy-Item THIRD_PARTY_NOTICES.md, README.md artifacts/win-arm64/ -Force
+      Compress-Archive -Path "artifacts/win-arm64/*" -DestinationPath "artifacts/WinQemu-win-arm64.zip" -Force
+
+      $lines = Get-ChildItem artifacts/*.zip | Sort-Object Name | ForEach-Object {
+        $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        "$h  $($_.Name)"
+      }
+      $lines | Set-Content -Path "artifacts/SHA256SUMS.txt" -Encoding UTF8
+  artifacts:
+    name: "WinQemu-${CI_COMMIT_REF_SLUG}-${CI_COMMIT_SHORT_SHA}"
+    when: on_success
+    expire_in: 30 days
+    paths:
+      - artifacts/WinQemu-win-x64.zip
+      - artifacts/WinQemu-win-arm64.zip
+      - artifacts/SHA256SUMS.txt
