@@ -299,6 +299,7 @@ public sealed class RfbVncClient : IAsyncDisposable
             0x08 => 0xFF08, // Backspace
             0x09 => 0xFF09, // Tab
             0x0D => 0xFF0D, // Enter
+            0x14 => 0xFFE5, // CapsLock
             0x1B => 0xFF1B, // Escape
             0x20 => 0x0020, // Space
             0x21 => 0xFF55, // PageUp
@@ -319,6 +320,12 @@ public sealed class RfbVncClient : IAsyncDisposable
             0xA5 => 0xFFEA, // Alt_R
             0x5B => 0xFFEB, // Super_L (Windows Key)
             0x5C => 0xFFEC, // Super_R
+            >= 0x60 and <= 0x69 => (uint)('0' + (virtualKey - 0x60)), // Numpad 0..9
+            0x6A => '*', // Numpad Multiply
+            0x6B => '+', // Numpad Add
+            0x6D => '-', // Numpad Subtract
+            0x6E => '.', // Numpad Decimal
+            0x6F => '/', // Numpad Divide
             >= 0x70 and <= 0x7B => (uint)(0xFFBE + (virtualKey - 0x70)), // F1..F12
             >= 0x30 and <= 0x39 => MapDigitOrShiftedSymbol(virtualKey, shiftPressed),
             >= 0x41 and <= 0x5A => (uint)(shiftPressed ? virtualKey : (virtualKey + 32)), // A..Z / a..z

@@ -1,15 +1,18 @@
 using System.Runtime.InteropServices.WindowsRuntime;
 using Microsoft.UI.Composition.SystemBackdrops;
+using Microsoft.UI.Input;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
+using Windows.System;
 using Windows.UI;
 using WinQemu.App.ViewModels;
 using WinQemu.Core.Configuration;
 using WinQemu.Core.Lifecycle;
+using WinQemu.Core.Models;
 using WinQemu.Display;
 using WinQemu.Native.GuestDisplay;
 using WinQemu.Qemu.Processes;
@@ -24,6 +27,7 @@ public sealed partial class VmDisplayWindow : Window
     private WriteableBitmap? _bitmap;
     private bool _isFullscreen;
     private byte _pointerButtonMask;
+    private bool _inputReleasedByHostKey;
 
     public VmDisplayWindow(VmCardItem card, ManagedVmSession session)
     {
@@ -110,7 +114,9 @@ public sealed partial class VmDisplayWindow : Window
             DispatcherQueue.TryEnqueue(() =>
             {
                 OverlayStatusText.Visibility = Visibility.Collapsed;
-                StatusFooterText.Text = $"Connected to 127.0.0.1:{_session.LaunchSpec.Endpoints.VncPort.Value} · Host key: {_card.Vm.Input.HostKeyShortcut}";
+                _inputReleasedByHostKey = false;
+                var focused = ViewportFocusSink.Focus(FocusState.Programmatic);
+                UpdateViewportCaptureVisualState(focused || ViewportFocusSink.FocusState != FocusState.Unfocused);
             });
         }
         catch (Exception ex)
@@ -221,20 +227,73 @@ public sealed partial class VmDisplayWindow : Window
         try { await _session.ShutDownGracefullyAsync(); } catch { }
     }
 
-    private async void OnRootKeyDown(object sender, KeyRoutedEventArgs e)
+    private async void OnViewportPreviewKeyDown(object sender, KeyRoutedEventArgs e)
     {
-        var keysym = RfbVncClient.MapWindowsVirtualKeyToX11Keysym((int)e.Key);
-        await _vncClient.SendKeyEventAsync(keysym, isDown: true);
+        await HandleViewportPreviewKeyAsync(e, isDown: true);
     }
 
-    private async void OnRootKeyUp(object sender, KeyRoutedEventArgs e)
+    private async void OnViewportPreviewKeyUp(object sender, KeyRoutedEventArgs e)
     {
-        var keysym = RfbVncClient.MapWindowsVirtualKeyToX11Keysym((int)e.Key);
-        await _vncClient.SendKeyEventAsync(keysym, isDown: false);
+        await HandleViewportPreviewKeyAsync(e, isDown: false);
     }
 
-    private async void OnRootLostFocus(object sender, RoutedEventArgs e)
+    private async Task HandleViewportPreviewKeyAsync(KeyRoutedEventArgs e, bool isDown)
     {
+        if (!_vncClient.IsConnected)
+        {
+            return;
+        }
+
+        var shiftPressed = InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Shift)
+            .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+        var ctrlPressed = InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control)
+            .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+        var menuPressed = InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Menu)
+            .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+
+        if (ctrlPressed && menuPressed && e.Key != VirtualKey.Delete)
+        {
+            e.Handled = true;
+            _inputReleasedByHostKey = true;
+            try
+            {
+                await _vncClient.ReleaseAllPressedKeysAsync();
+            }
+            catch
+            {
+            }
+
+            PauseResumeBtn.Focus(FocusState.Programmatic);
+            StatusFooterText.Text = "Input released to host (Click guest display to capture keyboard & mouse)";
+            return;
+        }
+
+        e.Handled = true;
+        var keysym = RfbVncClient.MapWindowsVirtualKeyToX11Keysym((int)e.Key, shiftPressed);
+        try
+        {
+            await _vncClient.SendKeyEventAsync(keysym, isDown);
+        }
+        catch
+        {
+        }
+    }
+
+    private void OnViewportGotFocus(object sender, RoutedEventArgs e)
+    {
+        _inputReleasedByHostKey = false;
+        UpdateViewportCaptureVisualState(hasFocus: true);
+    }
+
+    private async void OnViewportLostFocus(object sender, RoutedEventArgs e)
+    {
+        _pointerButtonMask = 0;
+        UpdateViewportCaptureVisualState(hasFocus: false, releasedByHostKey: _inputReleasedByHostKey);
+        if (!_vncClient.IsConnected)
+        {
+            return;
+        }
+
         try
         {
             await _vncClient.ReleaseAllPressedKeysAsync();
@@ -244,10 +303,36 @@ public sealed partial class VmDisplayWindow : Window
         }
     }
 
+    private void UpdateViewportCaptureVisualState(bool hasFocus, bool releasedByHostKey = false)
+    {
+        ViewportBorder.BorderBrush = hasFocus
+            ? MainWindow.ResolveThemeBrush(ViewportBorder, "AccentFillColorDefaultBrush", Color.FromArgb(255, 0x00, 0x78, 0xD4))
+            : MainWindow.ResolveThemeBrush(ViewportBorder, "CardStrokeColorDefaultBrush", Color.FromArgb(255, 0x30, 0x36, 0x3D));
+
+        var vncPort = _session.LaunchSpec.Endpoints.VncPort;
+        var endpointPrefix = _vncClient.IsConnected && vncPort is > 0
+            ? $"Connected to 127.0.0.1:{vncPort.Value}"
+            : "Display active";
+
+        if (hasFocus)
+        {
+            StatusFooterText.Text = $"{endpointPrefix} · Keyboard & Mouse Captured ({_card.Vm.Input.HostKeyShortcut} to release)";
+        }
+        else if (releasedByHostKey)
+        {
+            StatusFooterText.Text = "Input released to host (Click guest display to capture keyboard & mouse)";
+        }
+        else
+        {
+            StatusFooterText.Text = $"{endpointPrefix} · Click inside guest display to type";
+        }
+    }
+
     private async void OnWindowActivated(object sender, WindowActivatedEventArgs args)
     {
         if (args.WindowActivationState == WindowActivationState.Deactivated)
         {
+            _pointerButtonMask = 0;
             try
             {
                 await _vncClient.ReleaseAllPressedKeysAsync();
@@ -260,43 +345,86 @@ public sealed partial class VmDisplayWindow : Window
 
     private async void OnViewportPointerPressed(object sender, PointerRoutedEventArgs e)
     {
-        RootGrid.Focus(FocusState.Programmatic);
-        var pt = e.GetCurrentPoint(FramebufferImage);
-        _pointerButtonMask = 0;
-        if (pt.Properties.IsLeftButtonPressed) _pointerButtonMask |= 1;
-        if (pt.Properties.IsMiddleButtonPressed) _pointerButtonMask |= 2;
-        if (pt.Properties.IsRightButtonPressed) _pointerButtonMask |= 4;
-        await SendMappedPointerAsync(pt.Position.X, pt.Position.Y, _pointerButtonMask);
-    }
-
-    private async void OnViewportPointerMoved(object sender, PointerRoutedEventArgs e)
-    {
-        var pt = e.GetCurrentPoint(FramebufferImage);
-        await SendMappedPointerAsync(pt.Position.X, pt.Position.Y, _pointerButtonMask);
-    }
-
-    private async void OnViewportPointerReleased(object sender, PointerRoutedEventArgs e)
-    {
-        var pt = e.GetCurrentPoint(FramebufferImage);
-        _pointerButtonMask = 0;
-        await SendMappedPointerAsync(pt.Position.X, pt.Position.Y, 0);
-    }
-
-    private async Task SendMappedPointerAsync(double viewX, double viewY, byte mask)
-    {
-        if (FramebufferImage.ActualWidth <= 0 || FramebufferImage.ActualHeight <= 0 ||
-            _vncClient.FramebufferWidth <= 0 || _vncClient.FramebufferHeight <= 0)
+        _inputReleasedByHostKey = false;
+        ViewportFocusSink.Focus(FocusState.Programmatic);
+        UpdateViewportCaptureVisualState(ViewportFocusSink.FocusState != FocusState.Unfocused);
+        if (!_vncClient.IsConnected)
         {
             return;
         }
 
-        var gx = (int)Math.Clamp((viewX / FramebufferImage.ActualWidth) * _vncClient.FramebufferWidth, 0, _vncClient.FramebufferWidth - 1);
-        var gy = (int)Math.Clamp((viewY / FramebufferImage.ActualHeight) * _vncClient.FramebufferHeight, 0, _vncClient.FramebufferHeight - 1);
-        await _vncClient.SendPointerEventAsync(gx, gy, mask);
+        var pt = e.GetCurrentPoint(ViewportGrid);
+        _pointerButtonMask = 0;
+        if (pt.Properties.IsLeftButtonPressed) _pointerButtonMask |= 1;
+        if (pt.Properties.IsMiddleButtonPressed) _pointerButtonMask |= 2;
+        if (pt.Properties.IsRightButtonPressed) _pointerButtonMask |= 4;
+        await SendMappedPointerAsync(e, _pointerButtonMask, updateFooterStatus: true);
+    }
+
+    private async void OnViewportPointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (!_vncClient.IsConnected)
+        {
+            return;
+        }
+
+        await SendMappedPointerAsync(e, _pointerButtonMask, updateFooterStatus: _pointerButtonMask != 0);
+    }
+
+    private async void OnViewportPointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (!_vncClient.IsConnected)
+        {
+            _pointerButtonMask = 0;
+            return;
+        }
+
+        var pt = e.GetCurrentPoint(ViewportGrid);
+        byte nextMask = 0;
+        if (pt.Properties.IsLeftButtonPressed) nextMask |= 1;
+        if (pt.Properties.IsMiddleButtonPressed) nextMask |= 2;
+        if (pt.Properties.IsRightButtonPressed) nextMask |= 4;
+        _pointerButtonMask = nextMask;
+        await SendMappedPointerAsync(e, _pointerButtonMask, updateFooterStatus: false);
+    }
+
+    private async Task SendMappedPointerAsync(PointerRoutedEventArgs e, byte mask, bool updateFooterStatus = false)
+    {
+        if (!_vncClient.IsConnected)
+        {
+            return;
+        }
+
+        var mapped = MainWindow.TryMapViewportPointer(
+            e,
+            ViewportGrid,
+            FramebufferImage,
+            _vncClient.FramebufferWidth,
+            _vncClient.FramebufferHeight,
+            VmDisplayScalingMode.FitAspectRatio);
+        if (mapped is null)
+        {
+            return;
+        }
+
+        var (gx, gy) = mapped.Value;
+        if (updateFooterStatus && _session.LaunchSpec.Endpoints.VncPort is { } port)
+        {
+            StatusFooterText.Text = $"Connected to 127.0.0.1:{port} · Captured ({gx},{gy}) · {_card.Vm.Input.HostKeyShortcut} to release";
+        }
+
+        try
+        {
+            await _vncClient.SendPointerEventAsync(gx, gy, mask);
+        }
+        catch
+        {
+        }
     }
 
     private async void OnWindowClosed(object sender, WindowEventArgs args)
     {
+        _vncClient.FrameUpdated -= OnVncFrameUpdated;
         await _vncClient.DisposeAsync();
     }
 }

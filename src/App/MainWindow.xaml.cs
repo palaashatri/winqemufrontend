@@ -1,11 +1,14 @@
 using System.Diagnostics;
+using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.WindowsRuntime;
 using System.Text;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Storage;
 using Windows.Storage.Pickers;
+using Windows.System;
 using Microsoft.UI.Composition.SystemBackdrops;
+using Microsoft.UI.Input;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -33,6 +36,7 @@ namespace WinQemu.App;
 
 public sealed partial class MainWindow : Window
 {
+    private static readonly HttpClient SharedIsoDownloadHttpClient = CreateIsoDownloadHttpClient();
     private readonly MainViewModel _viewModel = new();
     private RfbVncClient? _embeddedVncClient;
     private WriteableBitmap? _embeddedBitmap;
@@ -43,6 +47,18 @@ public sealed partial class MainWindow : Window
     private bool _isFullscreen;
     private bool _allowCloseConfirmed;
     private bool _suppressConsoleSelectorAttach;
+    private bool _inputReleasedByHostKey;
+    private bool _isIsoDownloadInProgress;
+
+    private static HttpClient CreateIsoDownloadHttpClient()
+    {
+        var client = new HttpClient
+        {
+            Timeout = TimeSpan.FromMinutes(30)
+        };
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("WinQEMU/1.0");
+        return client;
+    }
 
     public MainWindow()
     {
@@ -647,6 +663,19 @@ public sealed partial class MainWindow : Window
             EmbeddedOverlaySubtitle.Text = $"Starting QEMU ({card.ArchitectureBadge}) and connecting QMP + localhost VNC...";
 
             var session = await _viewModel.StartVmAsync(card);
+            _viewModel.SelectedVm = card;
+            if (!ReferenceEquals(ConsoleVmSelector.SelectedItem, card))
+            {
+                _suppressConsoleSelectorAttach = true;
+                try
+                {
+                    ConsoleVmSelector.SelectedItem = card;
+                }
+                finally
+                {
+                    _suppressConsoleSelectorAttach = false;
+                }
+            }
             await AttachEmbeddedConsoleToSessionAsync(card, session);
             RefreshTopStatusBanners();
             GlobalStatusText.Text = $"'{card.Name}' is running ({session.ActiveAccelerator.ToUpperInvariant()}).";
@@ -671,9 +700,26 @@ public sealed partial class MainWindow : Window
         }
         else
         {
+            _attachCts?.Cancel();
+            if (_embeddedVncClient is not null)
+            {
+                _embeddedVncClient.FrameUpdated -= OnEmbeddedVncFrameUpdated;
+                await _embeddedVncClient.DisposeAsync();
+                _embeddedVncClient = null;
+            }
+            if (_activeConsoleSession is not null)
+            {
+                _activeConsoleSession.SerialOutputReceived -= OnSessionSerialOutputReceived;
+                _activeConsoleSession = null;
+            }
+            _embeddedPointerMask = 0;
+            _inputReleasedByHostKey = false;
+            EmbeddedFramebufferImage.Source = null;
+            _embeddedBitmap = null;
             EmbeddedDisplayOverlay.Visibility = Visibility.Visible;
             EmbeddedOverlayTitle.Text = $"{card.Name} is Stopped";
             EmbeddedOverlaySubtitle.Text = $"Architecture: {card.ArchitectureBadge} · {card.ResourceSummary}\nPress 'Start VM' above to boot this virtual machine.";
+            UpdateConsoleCaptureVisualState(hasFocus: false);
         }
     }
 
@@ -702,6 +748,7 @@ public sealed partial class MainWindow : Window
 
         if (_embeddedVncClient is not null)
         {
+            _embeddedVncClient.FrameUpdated -= OnEmbeddedVncFrameUpdated;
             await _embeddedVncClient.DisposeAsync();
             _embeddedVncClient = null;
         }
@@ -715,24 +762,34 @@ public sealed partial class MainWindow : Window
                 await vnc.ConnectLocalhostAsync(session.LaunchSpec.Endpoints.VncPort.Value, cancellationToken: ct);
                 if (ct.IsCancellationRequested)
                 {
+                    vnc.FrameUpdated -= OnEmbeddedVncFrameUpdated;
                     await vnc.DisposeAsync();
                     return;
                 }
 
                 _embeddedVncClient = vnc;
                 EmbeddedDisplayOverlay.Visibility = Visibility.Collapsed;
-                ConsoleFooterLeftText.Text = $"VNC Connected (127.0.0.1:{session.LaunchSpec.Endpoints.VncPort.Value}) · QMP Connected (127.0.0.1:{session.LaunchSpec.Endpoints.QmpPort})";
+                _inputReleasedByHostKey = false;
+                var focused = EmbeddedViewportFocusSink.Focus(FocusState.Programmatic);
+                if (!focused)
+                {
+                    DispatcherQueue.TryEnqueue(() => EmbeddedViewportFocusSink.Focus(FocusState.Programmatic));
+                }
+                UpdateConsoleCaptureVisualState(hasFocus: focused || EmbeddedViewportFocusSink.FocusState != FocusState.Unfocused);
             }
             catch (OperationCanceledException)
             {
+                vnc.FrameUpdated -= OnEmbeddedVncFrameUpdated;
                 await vnc.DisposeAsync();
             }
             catch (Exception ex)
             {
+                vnc.FrameUpdated -= OnEmbeddedVncFrameUpdated;
                 await vnc.DisposeAsync();
                 EmbeddedDisplayOverlay.Visibility = Visibility.Visible;
                 EmbeddedOverlayTitle.Text = "Display Connection Error";
                 EmbeddedOverlaySubtitle.Text = $"Could not connect to localhost VNC on port {session.LaunchSpec.Endpoints.VncPort.Value}: {ex.Message}";
+                UpdateConsoleCaptureVisualState(hasFocus: false);
             }
         }
     }
@@ -879,11 +936,20 @@ public sealed partial class MainWindow : Window
         if (session is not null)
         {
             await session.ForceStopAsync();
+            if (_embeddedVncClient is not null)
+            {
+                _embeddedVncClient.FrameUpdated -= OnEmbeddedVncFrameUpdated;
+                await _embeddedVncClient.DisposeAsync();
+                _embeddedVncClient = null;
+            }
+            _embeddedPointerMask = 0;
+            _inputReleasedByHostKey = false;
             card.State = VmState.Stopped;
             UpdateConsoleToolbarForSelectedVm(card);
             EmbeddedDisplayOverlay.Visibility = Visibility.Visible;
             EmbeddedOverlayTitle.Text = $"{card.Name} Powered Off";
             EmbeddedOverlaySubtitle.Text = "Virtual machine stopped.";
+            UpdateConsoleCaptureVisualState(hasFocus: false);
             RefreshTopStatusBanners();
             GlobalStatusText.Text = $"Force stopped '{card.Name}'.";
         }
@@ -1033,23 +1099,73 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private async void OnConsoleKeyDown(object sender, KeyRoutedEventArgs e)
+    private async void OnConsolePreviewKeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if (_embeddedVncClient is null) return;
-        var keysym = RfbVncClient.MapWindowsVirtualKeyToX11Keysym((int)e.Key);
-        await _embeddedVncClient.SendKeyEventAsync(keysym, isDown: true);
+        await HandleConsolePreviewKeyAsync(e, isDown: true);
     }
 
-    private async void OnConsoleKeyUp(object sender, KeyRoutedEventArgs e)
+    private async void OnConsolePreviewKeyUp(object sender, KeyRoutedEventArgs e)
     {
-        if (_embeddedVncClient is null) return;
-        var keysym = RfbVncClient.MapWindowsVirtualKeyToX11Keysym((int)e.Key);
-        await _embeddedVncClient.SendKeyEventAsync(keysym, isDown: false);
+        await HandleConsolePreviewKeyAsync(e, isDown: false);
+    }
+
+    private async Task HandleConsolePreviewKeyAsync(KeyRoutedEventArgs e, bool isDown)
+    {
+        if (_embeddedVncClient is null || !_embeddedVncClient.IsConnected)
+        {
+            return;
+        }
+
+        var shiftPressed = InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Shift)
+            .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+        var ctrlPressed = InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control)
+            .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+        var menuPressed = InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Menu)
+            .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+
+        if (ctrlPressed && menuPressed && e.Key != VirtualKey.Delete)
+        {
+            e.Handled = true;
+            _inputReleasedByHostKey = true;
+            try
+            {
+                await _embeddedVncClient.ReleaseAllPressedKeysAsync();
+            }
+            catch
+            {
+            }
+
+            ConsoleVmSelector.Focus(FocusState.Programmatic);
+            ConsoleFooterLeftText.Text = "Input released to host (Click guest display to capture keyboard & mouse)";
+            return;
+        }
+
+        e.Handled = true;
+        var keysym = RfbVncClient.MapWindowsVirtualKeyToX11Keysym((int)e.Key, shiftPressed);
+        try
+        {
+            await _embeddedVncClient.SendKeyEventAsync(keysym, isDown);
+        }
+        catch
+        {
+        }
+    }
+
+    private void OnConsoleGotFocus(object sender, RoutedEventArgs e)
+    {
+        _inputReleasedByHostKey = false;
+        UpdateConsoleCaptureVisualState(hasFocus: true);
     }
 
     private async void OnConsoleLostFocus(object sender, RoutedEventArgs e)
     {
-        if (_embeddedVncClient is null) return;
+        _embeddedPointerMask = 0;
+        UpdateConsoleCaptureVisualState(hasFocus: false, releasedByHostKey: _inputReleasedByHostKey);
+        if (_embeddedVncClient is null || !_embeddedVncClient.IsConnected)
+        {
+            return;
+        }
+
         try
         {
             await _embeddedVncClient.ReleaseAllPressedKeysAsync();
@@ -1059,10 +1175,137 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private void UpdateConsoleCaptureVisualState(bool hasFocus, bool releasedByHostKey = false)
+    {
+        EmbeddedViewportBorder.BorderBrush = hasFocus
+            ? ResolveThemeBrush(EmbeddedViewportBorder, "AccentFillColorDefaultBrush", Windows.UI.Color.FromArgb(255, 0x00, 0x78, 0xD4))
+            : ResolveThemeBrush(EmbeddedViewportBorder, "CardStrokeColorDefaultBrush", Windows.UI.Color.FromArgb(255, 0x30, 0x36, 0x3D));
+
+        var connectionPrefix = GetConsoleConnectionPrefix();
+        if (hasFocus)
+        {
+            ConsoleFooterLeftText.Text = $"{connectionPrefix} · Keyboard & Mouse Captured (Ctrl+Alt to release)";
+        }
+        else if (releasedByHostKey)
+        {
+            ConsoleFooterLeftText.Text = "Input released to host (Click guest display to capture keyboard & mouse)";
+        }
+        else
+        {
+            ConsoleFooterLeftText.Text = $"{connectionPrefix} · Click inside guest display to type";
+        }
+    }
+
+    private string GetConsoleConnectionPrefix()
+    {
+        if (_embeddedVncClient is { IsConnected: true } &&
+            _activeConsoleSession is { LaunchSpec.Endpoints: var ep } &&
+            ep.VncPort is > 0)
+        {
+            return $"VNC Connected (127.0.0.1:{ep.VncPort.Value}) · QMP Connected (127.0.0.1:{ep.QmpPort})";
+        }
+
+        return "Localhost VNC Transport (127.0.0.1) · Host Key: Ctrl+Alt";
+    }
+
+    internal static Brush ResolveThemeBrush(FrameworkElement target, string resourceKey, Windows.UI.Color fallbackColor)
+    {
+        if (Application.Current?.Resources is { } appRes)
+        {
+            var themeKey = target.ActualTheme == ElementTheme.Light ? "Light" : "Dark";
+            if (TryFindThemeBrush(appRes, themeKey, resourceKey) is Brush themedBrush)
+            {
+                return themedBrush;
+            }
+            if (appRes.TryGetValue(resourceKey, out var direct) && direct is Brush directBrush)
+            {
+                return directBrush;
+            }
+        }
+        return new SolidColorBrush(fallbackColor);
+    }
+
+    private static Brush? TryFindThemeBrush(ResourceDictionary dict, string themeKey, string resourceKey)
+    {
+        string[] candidateThemes = themeKey == "Light" ? ["Light", "Default"] : ["Dark", "Default"];
+        foreach (var candidate in candidateThemes)
+        {
+            if (dict.ThemeDictionaries.TryGetValue(candidate, out var themeObj) &&
+                themeObj is ResourceDictionary themeDict &&
+                themeDict.TryGetValue(resourceKey, out var value) &&
+                value is Brush brush)
+            {
+                return brush;
+            }
+        }
+
+        foreach (var merged in dict.MergedDictionaries)
+        {
+            if (TryFindThemeBrush(merged, themeKey, resourceKey) is Brush mergedBrush)
+            {
+                return mergedBrush;
+            }
+        }
+
+        return null;
+    }
+
+    internal static (int GuestX, int GuestY)? TryMapViewportPointer(
+        PointerRoutedEventArgs e,
+        FrameworkElement viewportGrid,
+        Image framebufferImage,
+        int fbWidth,
+        int fbHeight,
+        VmDisplayScalingMode scalingMode)
+    {
+        if (fbWidth <= 0 || fbHeight <= 0)
+        {
+            return null;
+        }
+
+        if (scalingMode == VmDisplayScalingMode.OneToOne &&
+            framebufferImage.ActualWidth > 0 &&
+            framebufferImage.ActualHeight > 0)
+        {
+            var imgPt = e.GetCurrentPoint(framebufferImage);
+            var gx = (int)Math.Clamp(Math.Round((imgPt.Position.X / framebufferImage.ActualWidth) * Math.Max(1, fbWidth - 1)), 0, fbWidth - 1);
+            var gy = (int)Math.Clamp(Math.Round((imgPt.Position.Y / framebufferImage.ActualHeight) * Math.Max(1, fbHeight - 1)), 0, fbHeight - 1);
+            return (gx, gy);
+        }
+
+        if (viewportGrid.ActualWidth > 0 && viewportGrid.ActualHeight > 0)
+        {
+            var gridPt = e.GetCurrentPoint(viewportGrid);
+            var placement = FastFramebufferPresenter.ComputeViewportPlacement(
+                viewportGrid.ActualWidth,
+                viewportGrid.ActualHeight,
+                fbWidth,
+                fbHeight,
+                scalingMode);
+            return FastFramebufferPresenter.MapViewPointToGuestPixel(
+                gridPt.Position.X,
+                gridPt.Position.Y,
+                placement,
+                fbWidth,
+                fbHeight);
+        }
+
+        if (framebufferImage.ActualWidth > 0 && framebufferImage.ActualHeight > 0)
+        {
+            var imgPt = e.GetCurrentPoint(framebufferImage);
+            var gx = (int)Math.Clamp(Math.Round((imgPt.Position.X / framebufferImage.ActualWidth) * Math.Max(1, fbWidth - 1)), 0, fbWidth - 1);
+            var gy = (int)Math.Clamp(Math.Round((imgPt.Position.Y / framebufferImage.ActualHeight) * Math.Max(1, fbHeight - 1)), 0, fbHeight - 1);
+            return (gx, gy);
+        }
+
+        return null;
+    }
+
     private async void OnWindowActivated(object sender, WindowActivatedEventArgs args)
     {
         if (args.WindowActivationState == WindowActivationState.Deactivated && _embeddedVncClient is not null)
         {
+            _embeddedPointerMask = 0;
             try
             {
                 await _embeddedVncClient.ReleaseAllPressedKeysAsync();
@@ -1075,45 +1318,88 @@ public sealed partial class MainWindow : Window
 
     private async void OnEmbeddedViewportPointerPressed(object sender, PointerRoutedEventArgs e)
     {
-        ConsoleViewPanel.Focus(FocusState.Programmatic);
-        if (_embeddedVncClient is null) return;
-        var pt = e.GetCurrentPoint(EmbeddedFramebufferImage);
-        _embeddedPointerMask = 0;
-        if (pt.Properties.IsLeftButtonPressed) _embeddedPointerMask |= 1;
-        if (pt.Properties.IsMiddleButtonPressed) _embeddedPointerMask |= 2;
-        if (pt.Properties.IsRightButtonPressed) _embeddedPointerMask |= 4;
-        await ForwardEmbeddedPointerAsync(pt.Position.X, pt.Position.Y, _embeddedPointerMask);
-    }
-
-    private async void OnEmbeddedViewportPointerMoved(object sender, PointerRoutedEventArgs e)
-    {
-        if (_embeddedVncClient is null) return;
-        var pt = e.GetCurrentPoint(EmbeddedFramebufferImage);
-        await ForwardEmbeddedPointerAsync(pt.Position.X, pt.Position.Y, _embeddedPointerMask);
-    }
-
-    private async void OnEmbeddedViewportPointerReleased(object sender, PointerRoutedEventArgs e)
-    {
-        if (_embeddedVncClient is null) return;
-        var pt = e.GetCurrentPoint(EmbeddedFramebufferImage);
-        _embeddedPointerMask = 0;
-        await ForwardEmbeddedPointerAsync(pt.Position.X, pt.Position.Y, 0);
-    }
-
-    private async Task ForwardEmbeddedPointerAsync(double viewX, double viewY, byte mask)
-    {
-        if (_embeddedVncClient is null ||
-            EmbeddedFramebufferImage.ActualWidth <= 0 ||
-            EmbeddedFramebufferImage.ActualHeight <= 0 ||
-            _embeddedVncClient.FramebufferWidth <= 0 ||
-            _embeddedVncClient.FramebufferHeight <= 0)
+        _inputReleasedByHostKey = false;
+        EmbeddedViewportFocusSink.Focus(FocusState.Programmatic);
+        UpdateConsoleCaptureVisualState(hasFocus: EmbeddedViewportFocusSink.FocusState != FocusState.Unfocused);
+        if (_embeddedVncClient is null || !_embeddedVncClient.IsConnected)
         {
             return;
         }
 
-        var gx = (int)Math.Clamp((viewX / EmbeddedFramebufferImage.ActualWidth) * _embeddedVncClient.FramebufferWidth, 0, _embeddedVncClient.FramebufferWidth - 1);
-        var gy = (int)Math.Clamp((viewY / EmbeddedFramebufferImage.ActualHeight) * _embeddedVncClient.FramebufferHeight, 0, _embeddedVncClient.FramebufferHeight - 1);
-        await _embeddedVncClient.SendPointerEventAsync(gx, gy, mask);
+        var pt = e.GetCurrentPoint(EmbeddedViewportGrid);
+        _embeddedPointerMask = 0;
+        if (pt.Properties.IsLeftButtonPressed) _embeddedPointerMask |= 1;
+        if (pt.Properties.IsMiddleButtonPressed) _embeddedPointerMask |= 2;
+        if (pt.Properties.IsRightButtonPressed) _embeddedPointerMask |= 4;
+        await ForwardEmbeddedPointerAsync(e, _embeddedPointerMask, updateFooterStatus: true);
+    }
+
+    private async void OnEmbeddedViewportPointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (_embeddedVncClient is null || !_embeddedVncClient.IsConnected)
+        {
+            return;
+        }
+
+        await ForwardEmbeddedPointerAsync(e, _embeddedPointerMask, updateFooterStatus: _embeddedPointerMask != 0);
+    }
+
+    private async void OnEmbeddedViewportPointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (_embeddedVncClient is null || !_embeddedVncClient.IsConnected)
+        {
+            _embeddedPointerMask = 0;
+            return;
+        }
+
+        var pt = e.GetCurrentPoint(EmbeddedViewportGrid);
+        byte nextMask = 0;
+        if (pt.Properties.IsLeftButtonPressed) nextMask |= 1;
+        if (pt.Properties.IsMiddleButtonPressed) nextMask |= 2;
+        if (pt.Properties.IsRightButtonPressed) nextMask |= 4;
+        _embeddedPointerMask = nextMask;
+        await ForwardEmbeddedPointerAsync(e, _embeddedPointerMask, updateFooterStatus: false);
+    }
+
+    private async Task ForwardEmbeddedPointerAsync(PointerRoutedEventArgs e, byte mask, bool updateFooterStatus = false)
+    {
+        if (_embeddedVncClient is null || !_embeddedVncClient.IsConnected)
+        {
+            return;
+        }
+
+        var scalingMode = ScalingModeCombo.SelectedIndex switch
+        {
+            1 => VmDisplayScalingMode.Stretch,
+            2 => VmDisplayScalingMode.OneToOne,
+            _ => VmDisplayScalingMode.FitAspectRatio
+        };
+
+        var mapped = TryMapViewportPointer(
+            e,
+            EmbeddedViewportGrid,
+            EmbeddedFramebufferImage,
+            _embeddedVncClient.FramebufferWidth,
+            _embeddedVncClient.FramebufferHeight,
+            scalingMode);
+        if (mapped is null)
+        {
+            return;
+        }
+
+        var (gx, gy) = mapped.Value;
+        if (updateFooterStatus)
+        {
+            ConsoleFooterLeftText.Text = $"{GetConsoleConnectionPrefix()} · Captured ({gx},{gy}) · Ctrl+Alt to release";
+        }
+
+        try
+        {
+            await _embeddedVncClient.SendPointerEventAsync(gx, gy, mask);
+        }
+        catch
+        {
+        }
     }
 
     // ==================== CARD CONTEXT ACTIONS ====================
@@ -1788,7 +2074,8 @@ public sealed partial class MainWindow : Window
                 entry.Architecture.ToDisplayName(),
                 $"{entry.PublisherName} · ~{sizeMb:N0} MiB",
                 entry.OfficialSourceUrl,
-                entry.IsDirectIsoDownload ? "Direct ISO" : "Official Download Page");
+                entry.IsDirectIsoDownload ? "Direct ISO" : "Official Download Page",
+                entry.IsDirectIsoDownload);
         }).ToList();
 
         var sb = new StringBuilder();
@@ -1799,6 +2086,180 @@ public sealed partial class MainWindow : Window
             sb.AppendLine($"  Source: {entry.OfficialSourceUrl}");
         }
         OsDownloadCatalogText.Text = sb.ToString().TrimEnd();
+    }
+
+    private async void OnDownloadAndBootOsIsoClick(object sender, RoutedEventArgs e)
+    {
+        if (_isIsoDownloadInProgress)
+        {
+            GlobalStatusText.Text = "An ISO download is already in progress. Please wait for it to complete.";
+            return;
+        }
+
+        if ((sender as FrameworkElement)?.Tag is not string entryId)
+        {
+            return;
+        }
+
+        var entry = OsDownloadCatalog.GetAll()
+            .FirstOrDefault(item => string.Equals(item.Id, entryId, StringComparison.OrdinalIgnoreCase));
+        if (entry is null || !entry.IsDirectIsoDownload)
+        {
+            return;
+        }
+
+        _isIsoDownloadInProgress = true;
+        var clickedButton = sender as Control;
+        if (clickedButton is not null)
+        {
+            clickedButton.IsEnabled = false;
+        }
+
+        string? tmpPath = null;
+        try
+        {
+            var cacheDir = _viewModel.Settings.IsoDownloadCacheDirectory;
+            Directory.CreateDirectory(cacheDir);
+
+            var uri = new Uri(entry.OfficialSourceUrl);
+            var fileName = Path.GetFileName(uri.LocalPath);
+            if (string.IsNullOrWhiteSpace(fileName) || !fileName.EndsWith(".iso", StringComparison.OrdinalIgnoreCase))
+            {
+                fileName = $"{entry.Id}.iso";
+            }
+
+            var isoPath = Path.Combine(cacheDir, fileName);
+            if (!File.Exists(isoPath) || new FileInfo(isoPath).Length == 0)
+            {
+                tmpPath = isoPath + ".tmp";
+                if (File.Exists(tmpPath))
+                {
+                    try { File.Delete(tmpPath); } catch { }
+                }
+
+                ShowcaseProgressText.Text = $"Connecting to download {entry.Name}...";
+                GlobalStatusText.Text = $"Downloading {entry.Name} from {uri.Host}...";
+
+                using var response = await SharedIsoDownloadHttpClient.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead);
+                response.EnsureSuccessStatusCode();
+
+                var totalBytes = response.Content.Headers.ContentLength ?? entry.ApproximateSizeBytes;
+                await using (var remoteStream = await response.Content.ReadAsStreamAsync())
+                await using (var fileStream = new FileStream(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None, 81920, useAsync: true))
+                {
+                    var buffer = new byte[81920];
+                    long downloaded = 0;
+                    var lastReportUtc = DateTimeOffset.MinValue;
+                    int read;
+                    while ((read = await remoteStream.ReadAsync(buffer)) > 0)
+                    {
+                        await fileStream.WriteAsync(buffer.AsMemory(0, read));
+                        downloaded += read;
+
+                        var now = DateTimeOffset.UtcNow;
+                        if ((now - lastReportUtc).TotalMilliseconds >= 200)
+                        {
+                            lastReportUtc = now;
+                            var downloadedMb = downloaded / (1024.0 * 1024.0);
+                            if (totalBytes > 0)
+                            {
+                                var totalMb = totalBytes / (1024.0 * 1024.0);
+                                var pct = Math.Clamp(downloaded * 100.0 / totalBytes, 0.0, 100.0);
+                                var status = $"Downloading {entry.Name}: {pct:0.0}% ({downloadedMb:0.1} / {totalMb:0.1} MiB)";
+                                ShowcaseProgressText.Text = status;
+                                GlobalStatusText.Text = status;
+                            }
+                            else
+                            {
+                                var status = $"Downloading {entry.Name}: {downloadedMb:0.1} MiB";
+                                ShowcaseProgressText.Text = status;
+                                GlobalStatusText.Text = status;
+                            }
+                        }
+                    }
+                    await fileStream.FlushAsync();
+                }
+
+                File.Move(tmpPath, isoPath, overwrite: true);
+                tmpPath = null;
+                ShowcaseProgressText.Text = $"Downloaded {fileName} ({new FileInfo(isoPath).Length / (1024.0 * 1024.0):0.1} MiB).";
+            }
+            else
+            {
+                ShowcaseProgressText.Text = $"Using cached ISO '{fileName}'.";
+                GlobalStatusText.Text = $"Using cached ISO '{fileName}' to create VM...";
+            }
+
+            var preset = GuestPresetCatalog.GetByIdOrDefault(entry.PresetId);
+            var rec = ResourceRecommender.RecommendForHost(preset);
+            var memoryMiB = entry.Id.StartsWith("alpine-", StringComparison.OrdinalIgnoreCase)
+                ? Math.Min(rec.RecommendedMemoryMiB, 1024)
+                : rec.RecommendedMemoryMiB;
+            var vcpus = entry.Id.StartsWith("alpine-", StringComparison.OrdinalIgnoreCase)
+                ? Math.Min(rec.RecommendedVcpus, 2)
+                : rec.RecommendedVcpus;
+
+            ShowcaseProgressText.Text = $"Creating VM '{entry.Name}'...";
+            var card = await _viewModel.CreateVmFromWizardAsync(
+                preset,
+                entry.Name,
+                isoPath,
+                memoryMiB,
+                vcpus,
+                rec.RecommendedDiskGiB,
+                enableExpressUnattended: false,
+                unattendedUsername: "user",
+                unattendedHostname: "winqemu-vm",
+                transientPassword: null,
+                bypassWin11Checks: true);
+
+            card.Vm.GuestProfile.OsDisplayName = entry.Name;
+            if (string.Equals(entry.Id, "alpine-virt-x86_64", StringComparison.OrdinalIgnoreCase))
+            {
+                card.Vm.Firmware.FirmwareType = VmFirmwareType.Bios;
+                card.Vm.Firmware.VarsFilePath = null;
+                card.Vm.Firmware.EnableSecureBoot = false;
+                card.Vm.Security.EnableSecureBoot = false;
+                card.Vm.Boot.BootOrder = ["cdrom", "disk"];
+
+                var cdrom = card.Vm.Storage.FirstOrDefault(d => d.Media == "cdrom");
+                if (cdrom is not null)
+                {
+                    cdrom.Bus = card.Vm.Machine.MachineType.Equals("q35", StringComparison.OrdinalIgnoreCase)
+                        ? "sata"
+                        : "ide";
+                    cdrom.IsBootDrive = true;
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(card.Vm.DirectoryPath))
+            {
+                await _viewModel.VmStore.SaveAsync(card.Vm, card.Vm.DirectoryPath);
+            }
+
+            card.RefreshStaticSummaries();
+            RefreshTopStatusBanners();
+            ShowcaseProgressText.Text = $"Ready — booting '{card.Name}'...";
+            await StartVmAndOpenConsoleAsync(card);
+        }
+        catch (Exception ex)
+        {
+            if (!string.IsNullOrWhiteSpace(tmpPath) && File.Exists(tmpPath))
+            {
+                try { File.Delete(tmpPath); } catch { }
+            }
+
+            ShowcaseProgressText.Text = $"Download & Boot failed: {ex.Message}";
+            GlobalStatusText.Text = $"Download & Boot failed for '{entry.Name}': {ex.Message}";
+        }
+        finally
+        {
+            if (clickedButton is not null)
+            {
+                clickedButton.IsEnabled = true;
+            }
+            _isIsoDownloadInProgress = false;
+        }
     }
 
     private void OnCopyDownloadUrlClick(object sender, RoutedEventArgs e)

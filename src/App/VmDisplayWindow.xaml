@@ -6,11 +6,7 @@
 
     <Grid x:Name="RootGrid"
           Background="Transparent"
-          SizeChanged="OnRootSizeChanged"
-          KeyDown="OnRootKeyDown"
-          KeyUp="OnRootKeyUp"
-          LostFocus="OnRootLostFocus"
-          IsTabStop="True">
+          SizeChanged="OnRootSizeChanged">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
@@ -97,22 +93,35 @@
         </Border>
 
         <!-- Guest Framebuffer Viewport -->
-        <Border Grid.Row="1" Background="#05070A" Margin="10" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
-            <Grid>
-                <Image x:Name="FramebufferImage"
-                       Stretch="Uniform"
-                       HorizontalAlignment="Center"
-                       VerticalAlignment="Center"
-                       PointerPressed="OnViewportPointerPressed"
-                       PointerMoved="OnViewportPointerMoved"
-                       PointerReleased="OnViewportPointerReleased" />
-                <TextBlock x:Name="OverlayStatusText"
-                           Text="Connecting to guest display..."
-                           Foreground="#C9D1D9"
-                           FontSize="14"
+        <Border x:Name="ViewportBorder" Grid.Row="1" Background="#05070A" Margin="10" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+            <ContentControl x:Name="ViewportFocusSink"
+                            IsTabStop="True"
+                            UseSystemFocusVisuals="False"
+                            HorizontalAlignment="Stretch"
+                            VerticalAlignment="Stretch"
+                            HorizontalContentAlignment="Stretch"
+                            VerticalContentAlignment="Stretch"
+                            PreviewKeyDown="OnViewportPreviewKeyDown"
+                            PreviewKeyUp="OnViewportPreviewKeyUp"
+                            GotFocus="OnViewportGotFocus"
+                            LostFocus="OnViewportLostFocus">
+                <Grid x:Name="ViewportGrid"
+                      Background="Transparent"
+                      PointerPressed="OnViewportPointerPressed"
+                      PointerMoved="OnViewportPointerMoved"
+                      PointerReleased="OnViewportPointerReleased">
+                    <Image x:Name="FramebufferImage"
+                           Stretch="Uniform"
                            HorizontalAlignment="Center"
                            VerticalAlignment="Center" />
-            </Grid>
+                    <TextBlock x:Name="OverlayStatusText"
+                               Text="Connecting to guest display..."
+                               Foreground="#C9D1D9"
+                               FontSize="14"
+                               HorizontalAlignment="Center"
+                               VerticalAlignment="Center" />
+                </Grid>
+            </ContentControl>
         </Border>
 
         <!-- Bottom Status Bar -->

@@ -694,7 +694,7 @@
                 </Grid>
 
                 <!-- ==================== VIEW 2: EMBEDDED GUEST DISPLAY CONSOLE (§28–§35, §52–§53) ==================== -->
-                <Grid x:Name="ConsoleViewPanel" Visibility="Collapsed" KeyDown="OnConsoleKeyDown" KeyUp="OnConsoleKeyUp" LostFocus="OnConsoleLostFocus" IsTabStop="True">
+                <Grid x:Name="ConsoleViewPanel" Visibility="Collapsed">
                     <Grid.ChildrenTransitions>
                         <TransitionCollection>
                             <EntranceThemeTransition FromVerticalOffset="10" />
@@ -869,31 +869,44 @@
                         </Grid.ColumnDefinitions>
 
                         <!-- Framebuffer Viewport -->
-                        <Border Grid.Column="0" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1,0,1,0" Background="#05070A" Padding="8">
-                            <Grid>
-                                <Image x:Name="EmbeddedFramebufferImage"
-                                       Stretch="Uniform"
-                                       HorizontalAlignment="Center"
-                                       VerticalAlignment="Center"
-                                       PointerPressed="OnEmbeddedViewportPointerPressed"
-                                       PointerMoved="OnEmbeddedViewportPointerMoved"
-                                       PointerReleased="OnEmbeddedViewportPointerReleased" />
+                        <Border x:Name="EmbeddedViewportBorder" Grid.Column="0" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" Background="#05070A" Padding="8">
+                            <ContentControl x:Name="EmbeddedViewportFocusSink"
+                                            IsTabStop="True"
+                                            UseSystemFocusVisuals="False"
+                                            HorizontalAlignment="Stretch"
+                                            VerticalAlignment="Stretch"
+                                            HorizontalContentAlignment="Stretch"
+                                            VerticalContentAlignment="Stretch"
+                                            PreviewKeyDown="OnConsolePreviewKeyDown"
+                                            PreviewKeyUp="OnConsolePreviewKeyUp"
+                                            GotFocus="OnConsoleGotFocus"
+                                            LostFocus="OnConsoleLostFocus">
+                                <Grid x:Name="EmbeddedViewportGrid"
+                                      Background="Transparent"
+                                      PointerPressed="OnEmbeddedViewportPointerPressed"
+                                      PointerMoved="OnEmbeddedViewportPointerMoved"
+                                      PointerReleased="OnEmbeddedViewportPointerReleased">
+                                    <Image x:Name="EmbeddedFramebufferImage"
+                                           Stretch="Uniform"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center" />
 
-                                <Border x:Name="EmbeddedDisplayOverlay"
-                                        HorizontalAlignment="Center"
-                                        VerticalAlignment="Center"
-                                        Padding="24,18"
-                                        CornerRadius="8"
-                                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                                        BorderThickness="1">
-                                    <StackPanel Spacing="8" HorizontalAlignment="Center">
-                                        <FontIcon FontFamily="Segoe Fluent Icons" Glyph="&#xE7F4;" FontSize="26" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" HorizontalAlignment="Center" />
-                                        <TextBlock x:Name="EmbeddedOverlayTitle" Text="Guest Display Ready" Style="{StaticResource BodyStrongTextBlockStyle}" HorizontalAlignment="Center" />
-                                        <TextBlock x:Name="EmbeddedOverlaySubtitle" Text="Press 'Start VM' to boot the selected virtual machine inside this embedded framebuffer." Style="{StaticResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" HorizontalAlignment="Center" TextAlignment="Center" MaxWidth="420" TextWrapping="Wrap" />
-                                    </StackPanel>
-                                </Border>
-                            </Grid>
+                                    <Border x:Name="EmbeddedDisplayOverlay"
+                                            HorizontalAlignment="Center"
+                                            VerticalAlignment="Center"
+                                            Padding="24,18"
+                                            CornerRadius="8"
+                                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                            BorderThickness="1">
+                                        <StackPanel Spacing="8" HorizontalAlignment="Center">
+                                            <FontIcon FontFamily="Segoe Fluent Icons" Glyph="&#xE7F4;" FontSize="26" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" HorizontalAlignment="Center" />
+                                            <TextBlock x:Name="EmbeddedOverlayTitle" Text="Guest Display Ready" Style="{StaticResource BodyStrongTextBlockStyle}" HorizontalAlignment="Center" />
+                                            <TextBlock x:Name="EmbeddedOverlaySubtitle" Text="Press 'Start VM' to boot the selected virtual machine inside this embedded framebuffer." Style="{StaticResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" HorizontalAlignment="Center" TextAlignment="Center" MaxWidth="420" TextWrapping="Wrap" />
+                                        </StackPanel>
+                                    </Border>
+                                </Grid>
+                            </ContentControl>
                         </Border>
 
                         <!-- Developer Serial Console & QMP Inspector Drawer (§51–§53) -->
@@ -1635,6 +1648,19 @@
                                                     </StackPanel>
 
                                                     <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                                        <Button Style="{StaticResource AccentButtonStyle}"
+                                                                CornerRadius="4"
+                                                                Padding="10,6"
+                                                                Tag="{x:Bind Id}"
+                                                                Visibility="{x:Bind DirectDownloadVisibility}"
+                                                                Click="OnDownloadAndBootOsIsoClick"
+                                                                AutomationProperties.Name="Download and Boot VM"
+                                                                ToolTipService.ToolTip="Download official ISO to local cache, create VM, and boot in Console">
+                                                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                                                <FontIcon FontFamily="Segoe Fluent Icons" Glyph="&#xE896;" FontSize="13" />
+                                                                <TextBlock Text="Download &amp; Boot VM" FontWeight="SemiBold" />
+                                                            </StackPanel>
+                                                        </Button>
                                                         <Button CornerRadius="4"
                                                                 Padding="10,6"
                                                                 Tag="{x:Bind OfficialSourceUrl}"

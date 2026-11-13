@@ -35,7 +35,12 @@ public sealed record OsDownloadCardItem(
     string ArchitectureText,
     string PublisherAndSize,
     string OfficialSourceUrl,
-    string KindBadgeText);
+    string KindBadgeText,
+    bool IsDirectIsoDownload)
+{
+    public Visibility DirectDownloadVisibility =>
+        IsDirectIsoDownload ? Visibility.Visible : Visibility.Collapsed;
+}
 
 public sealed class PortForwardRuleItem
 {
@@ -658,49 +663,53 @@ public sealed class MainViewModel : IAsyncDisposable
                     !string.IsNullOrWhiteSpace(existing.Vm.DirectoryPath))
                 {
                     var existingIsoPath = Path.Combine(existing.Vm.DirectoryPath, VmDirectoryLayout.DisksSubdir, "boot-media.iso");
-                    if (File.Exists(existingIsoPath))
+                    var needsRebuild = !File.Exists(existingIsoPath);
+                    if (!needsRebuild)
                     {
                         var isoBytes = await File.ReadAllBytesAsync(existingIsoPath, cancellationToken);
-                        var isoSpan = isoBytes.AsSpan();
-                        var expectedMarker = useWhpxBanner
-                            ? "WHPX Hardware Accelerated"u8
-                            : "QEMU TCG Dynamic Binary Translation"u8;
-                        if (isoSpan.IndexOf("WHPX / TCG"u8) >= 0 ||
-                            isoSpan.IndexOf("QEMU / WinQEMU Frontend Native Runtime"u8) >= 0 ||
-                            isoSpan.IndexOf(expectedMarker) < 0)
+                        needsRebuild = ShowcaseIsoNeedsRebuild(isoBytes, useWhpxBanner);
+                    }
+
+                    if (needsRebuild)
+                    {
+                        MultiArchBootImageFactory.CreateBootableElToritoIso(
+                            existingIsoPath,
+                            "WINQEMUBOOT",
+                            item.BannerTitle,
+                            $"{item.Subtitle} [Synthetic Boot Validation Media]",
+                            item.KernelInfo,
+                            item.Prompt,
+                            item.ColorAttr,
+                            hypervisorDescription);
+
+                        var qemuImgClient = (RuntimeInfo.QemuImgPath is not null && File.Exists(RuntimeInfo.QemuImgPath))
+                            ? new QemuImgClient(RuntimeInfo.QemuImgPath)
+                            : null;
+                        var snapCatalog = await _snapshotManager.LoadCatalogAsync(existing.Vm, qemuImgClient, cancellationToken);
+                        if (snapCatalog.Snapshots.Count == 0)
                         {
-                            MultiArchBootImageFactory.CreateBootableElToritoIso(
-                                existingIsoPath,
-                                "WINQEMUBOOT",
+                            var existingRawPath = Path.Combine(existing.Vm.DirectoryPath, VmDirectoryLayout.DisksSubdir, "boot-disk.raw");
+                            MultiArchBootImageFactory.CreateBootableHybridDiskImage(
+                                existingRawPath,
                                 item.BannerTitle,
                                 $"{item.Subtitle} [Synthetic Boot Validation Media]",
                                 item.KernelInfo,
                                 item.Prompt,
                                 item.ColorAttr,
                                 hypervisorDescription);
-
-                            var qemuImgClient = (RuntimeInfo.QemuImgPath is not null && File.Exists(RuntimeInfo.QemuImgPath))
-                                ? new QemuImgClient(RuntimeInfo.QemuImgPath)
-                                : null;
-                            var snapCatalog = await _snapshotManager.LoadCatalogAsync(existing.Vm, qemuImgClient, cancellationToken);
-                            if (snapCatalog.Snapshots.Count == 0)
+                            var existingDisk = existing.Vm.Storage.FirstOrDefault(d => d.Media == "disk");
+                            if (existingDisk is not null && qemuImgClient is not null &&
+                                string.Equals(existingDisk.Format, "qcow2", StringComparison.OrdinalIgnoreCase))
                             {
-                                var existingRawPath = Path.Combine(existing.Vm.DirectoryPath, VmDirectoryLayout.DisksSubdir, "boot-disk.raw");
-                                MultiArchBootImageFactory.CreateBootableHybridDiskImage(
-                                    existingRawPath,
-                                    item.BannerTitle,
-                                    $"{item.Subtitle} [Synthetic Boot Validation Media]",
-                                    item.KernelInfo,
-                                    item.Prompt,
-                                    item.ColorAttr,
-                                    hypervisorDescription);
-                                var existingDisk = existing.Vm.Storage.FirstOrDefault(d => d.Media == "disk");
-                                if (existingDisk is not null && qemuImgClient is not null &&
-                                    string.Equals(existingDisk.Format, "qcow2", StringComparison.OrdinalIgnoreCase))
-                                {
-                                    await qemuImgClient.ConvertAsync(existingRawPath, existingDisk.Path, "qcow2", cancellationToken: cancellationToken);
-                                    try { File.Delete(existingRawPath); } catch { }
-                                }
+                                await qemuImgClient.ConvertAsync(existingRawPath, existingDisk.Path, "qcow2", cancellationToken: cancellationToken);
+                                try { File.Delete(existingRawPath); } catch { }
+                            }
+                            else if (existingDisk is not null &&
+                                     string.Equals(existingDisk.Format, "raw", StringComparison.OrdinalIgnoreCase) &&
+                                     !string.Equals(existingDisk.Path, existingRawPath, StringComparison.OrdinalIgnoreCase))
+                            {
+                                File.Copy(existingRawPath, existingDisk.Path, overwrite: true);
+                                try { File.Delete(existingRawPath); } catch { }
                             }
                         }
                     }
@@ -817,19 +826,34 @@ public sealed class MainViewModel : IAsyncDisposable
         }
 
         var nonShowcase = AllVms.Where(c => !createdCards.Contains(c)).ToList();
-        AllVms.Clear();
-        foreach (var c in createdCards)
+        var desiredOrder = createdCards.Concat(nonShowcase).ToList();
+        if (!AllVms.SequenceEqual(desiredOrder))
         {
-            AllVms.Add(c);
-        }
-        foreach (var c in nonShowcase)
-        {
-            AllVms.Add(c);
+            AllVms.Clear();
+            foreach (var c in desiredOrder)
+            {
+                AllVms.Add(c);
+            }
         }
 
         ApplyFilter();
-        SelectedVm = createdCards.FirstOrDefault() ?? FilteredVms.FirstOrDefault();
+        if (SelectedVm is null || !AllVms.Contains(SelectedVm))
+        {
+            SelectedVm = createdCards.FirstOrDefault() ?? FilteredVms.FirstOrDefault();
+        }
         return createdCards;
+    }
+
+    private static bool ShowcaseIsoNeedsRebuild(byte[] isoBytes, bool useWhpxBanner)
+    {
+        var expectedMarker = useWhpxBanner
+            ? "WHPX Hardware Accelerated"u8
+            : "QEMU TCG Dynamic Binary Translation"u8;
+        var isoSpan = isoBytes.AsSpan();
+        return isoSpan.IndexOf("WHPX / TCG"u8) >= 0 ||
+               isoSpan.IndexOf("QEMU / WinQEMU Frontend Native Runtime"u8) >= 0 ||
+               isoSpan.IndexOf(expectedMarker) < 0 ||
+               isoSpan.IndexOf("INTERACTIVE CONSOLE READY"u8) < 0;
     }
 
     public QemuLaunchSpec BuildLaunchSpecForVm(
@@ -872,6 +896,25 @@ public sealed class MainViewModel : IAsyncDisposable
             card.Vm,
             AllVms.Select(c => c.Vm).ToList(),
             "start");
+
+        if (card.Vm.Identity.Tags.Contains("showcase-boot-test", StringComparer.OrdinalIgnoreCase) &&
+            !string.IsNullOrWhiteSpace(card.Vm.DirectoryPath))
+        {
+            var showcaseIsoPath = Path.Combine(card.Vm.DirectoryPath, VmDirectoryLayout.DisksSubdir, "boot-media.iso");
+            if (File.Exists(showcaseIsoPath))
+            {
+                var isoBytes = await File.ReadAllBytesAsync(showcaseIsoPath, cancellationToken);
+                if (isoBytes.AsSpan().IndexOf("INTERACTIVE CONSOLE READY"u8) < 0)
+                {
+                    var previousSelected = SelectedVm;
+                    await ProvisionMultiArchShowcaseVmsAsync(cancellationToken);
+                    if (previousSelected is not null && AllVms.Contains(previousSelected))
+                    {
+                        SelectedVm = previousSelected;
+                    }
+                }
+            }
+        }
 
         card.State = VmState.Starting;
         var endpoints = QemuCommandBuilder.AllocateLocalEndpoints(card.Vm);
