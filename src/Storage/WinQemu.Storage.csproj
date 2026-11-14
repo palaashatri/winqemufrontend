@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>WinQemu.Storage</RootNamespace>
+    <AssemblyName>WinQemu.Storage</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Core\WinQemu.Core.csproj" />
+    <ProjectReference Include="..\Qemu\WinQemu.Qemu.csproj" />
+  </ItemGroup>
+</Project>
