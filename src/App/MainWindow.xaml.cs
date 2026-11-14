@@ -380,21 +380,7 @@ public sealed partial class MainWindow : Window
             UpdateConsoleToolbarForSelectedVm(selectedCard);
         }
 
-        if (width < 880)
-        {
-            DevDrawerColumn.Width = new GridLength(0);
-            DevDrawerPanel.Visibility = Visibility.Collapsed;
-        }
-        else if (ToggleDevDrawerBtn.IsChecked == true)
-        {
-            DevDrawerColumn.Width = new GridLength(320);
-            DevDrawerPanel.Visibility = Visibility.Visible;
-        }
-        else
-        {
-            DevDrawerColumn.Width = new GridLength(0);
-            DevDrawerPanel.Visibility = Visibility.Collapsed;
-        }
+        ApplyDevDrawerLayout(ToggleDevDrawerBtn.IsChecked == true, width);
 
         // Wizard, Hardware, Snapshots, Downloads & Settings responsive form grids
         var stackTwoCol = width < 760;
@@ -647,6 +633,7 @@ public sealed partial class MainWindow : Window
     {
         try
         {
+            _viewModel.SelectedVm = card;
             GlobalStatusText.Text = $"Starting '{card.Name}' ({card.ArchitectureBadge})...";
             _suppressConsoleSelectorAttach = true;
             try
@@ -1066,9 +1053,23 @@ public sealed partial class MainWindow : Window
     private void SetDevDrawerOpen(bool open)
     {
         ToggleDevDrawerBtn.IsChecked = open;
-        var canShow = open && (MainRootGrid.ActualWidth <= 0 || MainRootGrid.ActualWidth >= 880);
-        DevDrawerColumn.Width = canShow ? new GridLength(320) : new GridLength(0);
-        DevDrawerPanel.Visibility = canShow ? Visibility.Visible : Visibility.Collapsed;
+        ApplyDevDrawerLayout(open, MainRootGrid.ActualWidth);
+    }
+
+    private void ApplyDevDrawerLayout(bool open, double totalWidth)
+    {
+        if (!open)
+        {
+            DevDrawerColumn.Width = new GridLength(0);
+            DevDrawerPanel.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        var drawerWidth = (totalWidth > 0 && totalWidth < 880)
+            ? Math.Clamp(totalWidth * 0.42, 220, 300)
+            : 340;
+        DevDrawerColumn.Width = new GridLength(drawerWidth);
+        DevDrawerPanel.Visibility = Visibility.Visible;
     }
 
     private async void OnSendSerialInputClick(object sender, RoutedEventArgs e)
@@ -1940,6 +1941,33 @@ public sealed partial class MainWindow : Window
             : null;
 
         var catalog = await _viewModel.SnapshotManager.LoadCatalogAsync(card.Vm, qemuImg);
+        var previousSelectedId = (SnapshotTargetSelector.SelectedItem as ComboBoxItem)?.Tag as string;
+        SnapshotTargetSelector.Items.Clear();
+        var selectedIndex = -1;
+        for (var i = 0; i < catalog.Snapshots.Count; i++)
+        {
+            var snap = catalog.Snapshots[i];
+            SnapshotTargetSelector.Items.Add(new ComboBoxItem
+            {
+                Content = $"{snap.DisplayName} ({snap.CreatedAtUtc.ToLocalTime():yyyy-MM-dd HH:mm:ss})",
+                Tag = snap.Id
+            });
+            if (!string.IsNullOrWhiteSpace(previousSelectedId) &&
+                string.Equals(snap.Id, previousSelectedId, StringComparison.Ordinal))
+            {
+                selectedIndex = i;
+            }
+        }
+
+        var hasSnapshots = catalog.Snapshots.Count > 0;
+        SnapshotTargetSelector.IsEnabled = hasSnapshots;
+        RestoreSnapshotBtn.IsEnabled = hasSnapshots;
+        DeleteSnapshotBtn.IsEnabled = hasSnapshots;
+        if (hasSnapshots)
+        {
+            SnapshotTargetSelector.SelectedIndex = selectedIndex >= 0 ? selectedIndex : catalog.Snapshots.Count - 1;
+        }
+
         var sb = new StringBuilder();
         sb.AppendLine($"Current State ({card.StatusBadgeText})");
         for (var i = catalog.Snapshots.Count - 1; i >= 0; i--)
@@ -1964,6 +1992,20 @@ public sealed partial class MainWindow : Window
         CloneDependencyGraphText.Text = graphLines.Count > 0
             ? "Backing-File Dependency Graph:\n" + string.Join("\n", graphLines)
             : "Backing-File Dependency Graph: All virtual disks are currently independent.";
+    }
+
+    private VmSnapshotRecord? ResolveSelectedSnapshot(VmSnapshotCatalog catalog)
+    {
+        if (SnapshotTargetSelector.SelectedItem is ComboBoxItem { Tag: string snapId })
+        {
+            var match = catalog.Snapshots.FirstOrDefault(s => string.Equals(s.Id, snapId, StringComparison.Ordinal));
+            if (match is not null)
+            {
+                return match;
+            }
+        }
+
+        return catalog.Snapshots.LastOrDefault();
     }
 
     private async void OnTakeSnapshotClick(object sender, RoutedEventArgs e)
@@ -1993,14 +2035,14 @@ public sealed partial class MainWindow : Window
         {
             var qemuImg = new QemuImgClient(_viewModel.RuntimeInfo.QemuImgPath);
             var catalog = await _viewModel.SnapshotManager.LoadCatalogAsync(card.Vm, qemuImg);
-            var latest = catalog.Snapshots.LastOrDefault();
-            if (latest is null) return;
+            var targetSnapshot = ResolveSelectedSnapshot(catalog);
+            if (targetSnapshot is null) return;
 
             var activeSession = _viewModel.ProcessManager.GetSession(card.Id);
             var allVms = _viewModel.AllVms.Select(c => c.Vm).ToList();
-            await _viewModel.SnapshotManager.RestoreSnapshotAsync(card.Vm, latest.Id, qemuImg, activeSession, allVms: allVms);
+            await _viewModel.SnapshotManager.RestoreSnapshotAsync(card.Vm, targetSnapshot.Id, qemuImg, activeSession, allVms: allVms);
             await RefreshSnapshotsAndCloneViewAsync(card);
-            GlobalStatusText.Text = $"Restored snapshot '{latest.DisplayName}' on '{card.Name}'.";
+            GlobalStatusText.Text = $"Restored snapshot '{targetSnapshot.DisplayName}' on '{card.Name}'.";
         }
         catch (Exception ex)
         {
@@ -2015,14 +2057,14 @@ public sealed partial class MainWindow : Window
         {
             var qemuImg = new QemuImgClient(_viewModel.RuntimeInfo.QemuImgPath);
             var catalog = await _viewModel.SnapshotManager.LoadCatalogAsync(card.Vm, qemuImg);
-            var latest = catalog.Snapshots.LastOrDefault();
-            if (latest is null) return;
+            var targetSnapshot = ResolveSelectedSnapshot(catalog);
+            if (targetSnapshot is null) return;
 
             var activeSession = _viewModel.ProcessManager.GetSession(card.Id);
             var allVms = _viewModel.AllVms.Select(c => c.Vm).ToList();
-            await _viewModel.SnapshotManager.DeleteSnapshotAsync(card.Vm, latest.Id, qemuImg, activeSession, allVms: allVms);
+            await _viewModel.SnapshotManager.DeleteSnapshotAsync(card.Vm, targetSnapshot.Id, qemuImg, activeSession, allVms: allVms);
             await RefreshSnapshotsAndCloneViewAsync(card);
-            GlobalStatusText.Text = $"Deleted snapshot '{latest.DisplayName}'.";
+            GlobalStatusText.Text = $"Deleted snapshot '{targetSnapshot.DisplayName}'.";
         }
         catch (Exception ex)
         {

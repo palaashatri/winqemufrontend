@@ -285,6 +285,7 @@ public sealed class MainViewModel : IAsyncDisposable
     private readonly CloneManager _cloneManager;
     private readonly Dictionary<VmArchitecture, QemuTargetCapabilities> _capabilitiesByArch = [];
     private readonly Dictionary<string, EventHandler<VmStateTransitionEvent>> _sessionStateHandlers = new(StringComparer.Ordinal);
+    private readonly Lock _sessionStateHandlersLock = new();
 
     public MainViewModel()
     {
@@ -640,12 +641,7 @@ public sealed class MainViewModel : IAsyncDisposable
         {
             var existing = AllVms.FirstOrDefault(v =>
                 string.Equals(v.Name, item.Name, StringComparison.OrdinalIgnoreCase));
-            var useWhpxBanner = item.Arch == VmArchitecture.X86_64 &&
-                                hostWhpxEnabled &&
-                                existing?.Vm.Accelerator != VmAcceleratorMode.Tcg;
-            var hypervisorDescription = useWhpxBanner
-                ? "Windows Hypervisor Platform (WHPX Hardware Accelerated)"
-                : "QEMU TCG Dynamic Binary Translation (Multi-Arch Emulation)";
+            var hypervisorDescription = GetShowcaseHypervisorDescription(item.Arch);
 
             if (existing is not null)
             {
@@ -667,7 +663,7 @@ public sealed class MainViewModel : IAsyncDisposable
                     if (!needsRebuild)
                     {
                         var isoBytes = await File.ReadAllBytesAsync(existingIsoPath, cancellationToken);
-                        needsRebuild = ShowcaseIsoNeedsRebuild(isoBytes, useWhpxBanner);
+                        needsRebuild = ShowcaseIsoNeedsRebuild(isoBytes, item.Arch);
                     }
 
                     if (needsRebuild)
@@ -682,12 +678,16 @@ public sealed class MainViewModel : IAsyncDisposable
                             item.ColorAttr,
                             hypervisorDescription);
 
-                        var qemuImgClient = (RuntimeInfo.QemuImgPath is not null && File.Exists(RuntimeInfo.QemuImgPath))
-                            ? new QemuImgClient(RuntimeInfo.QemuImgPath)
-                            : null;
-                        var snapCatalog = await _snapshotManager.LoadCatalogAsync(existing.Vm, qemuImgClient, cancellationToken);
-                        if (snapCatalog.Snapshots.Count == 0)
+                        // Never overwrite an existing system disk (e.g. if the user installed a real OS onto it).
+                        // Only recreate missing disk media.
+                        var existingDisk = existing.Vm.Storage.FirstOrDefault(d => d.Media == "disk");
+                        if (existingDisk is not null &&
+                            !string.IsNullOrWhiteSpace(existingDisk.Path) &&
+                            !File.Exists(existingDisk.Path))
                         {
+                            var qemuImgClient = (RuntimeInfo.QemuImgPath is not null && File.Exists(RuntimeInfo.QemuImgPath))
+                                ? new QemuImgClient(RuntimeInfo.QemuImgPath)
+                                : null;
                             var existingRawPath = Path.Combine(existing.Vm.DirectoryPath, VmDirectoryLayout.DisksSubdir, "boot-disk.raw");
                             MultiArchBootImageFactory.CreateBootableHybridDiskImage(
                                 existingRawPath,
@@ -697,18 +697,16 @@ public sealed class MainViewModel : IAsyncDisposable
                                 item.Prompt,
                                 item.ColorAttr,
                                 hypervisorDescription);
-                            var existingDisk = existing.Vm.Storage.FirstOrDefault(d => d.Media == "disk");
-                            if (existingDisk is not null && qemuImgClient is not null &&
+                            if (qemuImgClient is not null &&
                                 string.Equals(existingDisk.Format, "qcow2", StringComparison.OrdinalIgnoreCase))
                             {
                                 await qemuImgClient.ConvertAsync(existingRawPath, existingDisk.Path, "qcow2", cancellationToken: cancellationToken);
                                 try { File.Delete(existingRawPath); } catch { }
                             }
-                            else if (existingDisk is not null &&
-                                     string.Equals(existingDisk.Format, "raw", StringComparison.OrdinalIgnoreCase) &&
+                            else if (string.Equals(existingDisk.Format, "raw", StringComparison.OrdinalIgnoreCase) &&
                                      !string.Equals(existingDisk.Path, existingRawPath, StringComparison.OrdinalIgnoreCase))
                             {
-                                File.Copy(existingRawPath, existingDisk.Path, overwrite: true);
+                                File.Copy(existingRawPath, existingDisk.Path, overwrite: false);
                                 try { File.Delete(existingRawPath); } catch { }
                             }
                         }
@@ -844,13 +842,19 @@ public sealed class MainViewModel : IAsyncDisposable
         return createdCards;
     }
 
-    private static bool ShowcaseIsoNeedsRebuild(byte[] isoBytes, bool useWhpxBanner)
+    private static string GetShowcaseHypervisorDescription(VmArchitecture arch) =>
+        arch == VmArchitecture.X86_64
+            ? "QEMU x86_64 Virtual Machine (Active Accelerator Shown in Console Toolbar)"
+            : "QEMU TCG Dynamic Binary Translation (Multi-Arch Emulation)";
+
+    private static bool ShowcaseIsoNeedsRebuild(byte[] isoBytes, VmArchitecture arch)
     {
-        var expectedMarker = useWhpxBanner
-            ? "WHPX Hardware Accelerated"u8
+        var expectedMarker = arch == VmArchitecture.X86_64
+            ? "QEMU x86_64 Virtual Machine (Active Accelerator Shown in Console Toolbar)"u8
             : "QEMU TCG Dynamic Binary Translation"u8;
         var isoSpan = isoBytes.AsSpan();
-        return isoSpan.IndexOf("WHPX / TCG"u8) >= 0 ||
+        return isoSpan.IndexOf("WHPX Hardware Accelerated"u8) >= 0 ||
+               isoSpan.IndexOf("WHPX / TCG"u8) >= 0 ||
                isoSpan.IndexOf("QEMU / WinQEMU Frontend Native Runtime"u8) >= 0 ||
                isoSpan.IndexOf(expectedMarker) < 0 ||
                isoSpan.IndexOf("INTERACTIVE CONSOLE READY"u8) < 0;
@@ -1047,34 +1051,51 @@ public sealed class MainViewModel : IAsyncDisposable
     private void SubscribeSessionStateChanges(VmCardItem card, ManagedVmSession session)
     {
         var vmId = session.Vm.Identity.Id;
-        if (_sessionStateHandlers.Remove(vmId, out var existingHandler))
+        lock (_sessionStateHandlersLock)
         {
-            session.StateMachine.StateChanged -= existingHandler;
+            if (_sessionStateHandlers.Remove(vmId, out var existingHandler))
+            {
+                session.StateMachine.StateChanged -= existingHandler;
+            }
         }
 
         EventHandler<VmStateTransitionEvent>? handler = null;
         handler = (_, e) =>
         {
-            var currentCard = AllVms.FirstOrDefault(c => string.Equals(c.Id, vmId, StringComparison.Ordinal)) ?? card;
-            var dq = App.CurrentMainWindow?.DispatcherQueue;
-            if (dq is not null)
-            {
-                dq.TryEnqueue(() => currentCard.State = e.CurrentState);
-            }
-            else
-            {
-                currentCard.State = e.CurrentState;
-            }
-
             if (e.CurrentState is VmState.Stopped or VmState.Crashed)
             {
                 session.StateMachine.StateChanged -= handler;
-                _sessionStateHandlers.Remove(vmId);
-                _ = CleanupSeedMediaAfterInstallAsync(currentCard.Vm);
+                lock (_sessionStateHandlersLock)
+                {
+                    _sessionStateHandlers.Remove(vmId);
+                }
+            }
+
+            void ApplyStateOnUiThread()
+            {
+                var currentCard = AllVms.FirstOrDefault(c => string.Equals(c.Id, vmId, StringComparison.Ordinal)) ?? card;
+                currentCard.State = e.CurrentState;
+                if (e.CurrentState is VmState.Stopped or VmState.Crashed)
+                {
+                    _ = CleanupSeedMediaAfterInstallAsync(currentCard.Vm);
+                }
+            }
+
+            var dq = App.CurrentMainWindow?.DispatcherQueue;
+            if (dq is not null && !dq.HasThreadAccess)
+            {
+                dq.TryEnqueue(ApplyStateOnUiThread);
+            }
+            else
+            {
+                ApplyStateOnUiThread();
             }
         };
 
-        _sessionStateHandlers[vmId] = handler;
+        lock (_sessionStateHandlersLock)
+        {
+            _sessionStateHandlers[vmId] = handler;
+        }
         session.StateMachine.StateChanged += handler;
     }
 

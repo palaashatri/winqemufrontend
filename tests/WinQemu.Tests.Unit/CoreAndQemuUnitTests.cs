@@ -1,3 +1,4 @@
+using System.Security;
 using System.Text;
 using WinQemu.Core.Configuration;
 using WinQemu.Core.Diagnostics;
@@ -689,6 +690,53 @@ public sealed class CoreAndQemuUnitTests
             if (Directory.Exists(tempDir))
             {
                 Directory.Delete(tempDir, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task PrReviewFixes_LogRedactionEscapedQuotes_SecurityExceptionAndMoveSelfGuard()
+    {
+        // 1. Escaped quotes in LogRotator.RedactSecrets should be redacted through the closing unescaped quote
+        var doubleQuotedRedacted = LogRotator.RedactSecrets("""{"password": "alpha\" beta", "ok": 1}""");
+        Assert.DoesNotContain("alpha", doubleQuotedRedacted, StringComparison.Ordinal);
+        Assert.DoesNotContain("beta", doubleQuotedRedacted, StringComparison.Ordinal);
+        Assert.Contains("[REDACTED]", doubleQuotedRedacted, StringComparison.Ordinal);
+
+        var singleQuotedRedacted = LogRotator.RedactSecrets("""token='abc\'def' user=alice""");
+        Assert.DoesNotContain("abc", singleQuotedRedacted, StringComparison.Ordinal);
+        Assert.DoesNotContain("def", singleQuotedRedacted, StringComparison.Ordinal);
+        Assert.Contains("user=alice", singleQuotedRedacted, StringComparison.Ordinal);
+
+        // 2. VmConfigurationStore.MoveVmDirectoryAsync rejects moving into its own subdirectory
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"winqemu-prfixes-{Guid.NewGuid():N}");
+        try
+        {
+            var store = new VmConfigurationStore();
+            var preset = GuestPresetCatalog.GetByIdOrDefault("ubuntu");
+            var sourceVmDir = Path.Combine(tempRoot, "SourceVm");
+            var vm = GuestPresetCatalog.CreateVmFromPreset(preset, "SourceVm", sourceVmDir);
+            vm.AdvancedQemuArgs.Add("-no-hpet");
+            await store.SaveAsync(vm, sourceVmDir);
+
+            var nestedTarget = Path.Combine(sourceVmDir, "nested");
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                store.MoveVmDirectoryAsync(vm, nestedTarget));
+
+            // 3. Export & Import without approval throws System.Security.SecurityException
+            var qvmPath = Path.Combine(tempRoot, "export.qvm");
+            await store.ExportPortablePackageAsync(vm, qvmPath);
+            var importLib = Path.Combine(tempRoot, "ImportLib");
+            Directory.CreateDirectory(importLib);
+
+            await Assert.ThrowsAsync<SecurityException>(() =>
+                store.ImportPortablePackageAsync(qvmPath, importLib, allowExternalHostPathsAndRawArgs: false));
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot))
+            {
+                Directory.Delete(tempRoot, recursive: true);
             }
         }
     }

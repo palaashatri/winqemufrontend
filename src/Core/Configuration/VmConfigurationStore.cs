@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Security;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -152,20 +153,28 @@ public sealed class VmConfigurationStore
             throw new InvalidOperationException("VM does not have an existing source directory.");
         }
 
-        var oldDir = Path.GetFullPath(vm.DirectoryPath);
+        var oldDir = Path.TrimEndingDirectorySeparator(Path.GetFullPath(vm.DirectoryPath));
+        var normalizedTargetParent = Path.TrimEndingDirectorySeparator(Path.GetFullPath(targetParentDirectory));
+        if (string.Equals(oldDir, normalizedTargetParent, StringComparison.OrdinalIgnoreCase) ||
+            normalizedTargetParent.StartsWith(oldDir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"Cannot move VM directory '{oldDir}' into itself or its subdirectory '{normalizedTargetParent}'.");
+        }
+
         var folderName = SanitizeFolderName(vm.Identity.Name, vm.Identity.Id);
-        var newDir = Path.GetFullPath(Path.Combine(targetParentDirectory, folderName));
+        var newDir = Path.TrimEndingDirectorySeparator(Path.GetFullPath(Path.Combine(normalizedTargetParent, folderName)));
         if (string.Equals(oldDir, newDir, StringComparison.OrdinalIgnoreCase))
         {
             return oldDir;
         }
 
-        if (Directory.Exists(newDir))
+        if (Directory.Exists(newDir) || File.Exists(newDir))
         {
-            newDir = Path.GetFullPath(Path.Combine(targetParentDirectory, $"{folderName}-{GetShortIdPrefix(vm.Identity.Id)}"));
+            newDir = Path.TrimEndingDirectorySeparator(Path.GetFullPath(Path.Combine(normalizedTargetParent, $"{folderName}-{GetShortIdPrefix(vm.Identity.Id)}")));
         }
 
-        Directory.CreateDirectory(targetParentDirectory);
+        Directory.CreateDirectory(normalizedTargetParent);
         MoveDirectorySafe(oldDir, newDir);
 
         RetargetDirectoryPaths(vm, oldDir, newDir);
@@ -348,8 +357,21 @@ public sealed class VmConfigurationStore
 
     private static void MoveDirectorySafe(string sourceDir, string destinationDir)
     {
-        var fullSrc = Path.GetFullPath(sourceDir);
-        var fullDst = Path.GetFullPath(destinationDir);
+        var fullSrc = Path.TrimEndingDirectorySeparator(Path.GetFullPath(sourceDir));
+        var fullDst = Path.TrimEndingDirectorySeparator(Path.GetFullPath(destinationDir));
+
+        if (string.Equals(fullSrc, fullDst, StringComparison.OrdinalIgnoreCase) ||
+            fullDst.StartsWith(fullSrc + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"Cannot move directory '{fullSrc}' into itself or its subdirectory '{fullDst}'.");
+        }
+
+        if (Directory.Exists(fullDst) || File.Exists(fullDst))
+        {
+            throw new IOException($"Destination path '{fullDst}' already exists.");
+        }
+
         if (string.Equals(Path.GetPathRoot(fullSrc), Path.GetPathRoot(fullDst), StringComparison.OrdinalIgnoreCase))
         {
             try
@@ -357,7 +379,7 @@ public sealed class VmConfigurationStore
                 Directory.Move(fullSrc, fullDst);
                 return;
             }
-            catch (IOException) when (!Directory.Exists(fullDst))
+            catch (IOException) when (!Directory.Exists(fullDst) && !File.Exists(fullDst))
             {
                 // Fall back to copy + delete (e.g. reparse points / mount junctions across volumes).
             }
@@ -369,12 +391,13 @@ public sealed class VmConfigurationStore
 
     private static void CopyDirectoryRecursive(string sourceDir, string destinationDir)
     {
+        var createdDestination = !Directory.Exists(destinationDir);
         Directory.CreateDirectory(destinationDir);
         try
         {
             foreach (var file in Directory.EnumerateFiles(sourceDir))
             {
-                File.Copy(file, Path.Combine(destinationDir, Path.GetFileName(file)), overwrite: true);
+                File.Copy(file, Path.Combine(destinationDir, Path.GetFileName(file)), overwrite: false);
             }
 
             foreach (var subDir in Directory.EnumerateDirectories(sourceDir))
@@ -384,15 +407,18 @@ public sealed class VmConfigurationStore
         }
         catch
         {
-            try
+            if (createdDestination)
             {
-                if (Directory.Exists(destinationDir))
+                try
                 {
-                    Directory.Delete(destinationDir, recursive: true);
+                    if (Directory.Exists(destinationDir))
+                    {
+                        Directory.Delete(destinationDir, recursive: true);
+                    }
                 }
-            }
-            catch
-            {
+                catch
+                {
+                }
             }
             throw;
         }
@@ -589,8 +615,6 @@ public sealed class VmConfigurationStore
         }
     }
 }
-
-public sealed class SecurityException(string message) : Exception(message);
 
 public static class SchemaMigrator
 {

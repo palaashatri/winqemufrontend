@@ -1482,17 +1482,24 @@
                                                    TextWrapping="Wrap"
                                                    Text="Current State" />
                                     </Border>
+                                    <ComboBox x:Name="SnapshotTargetSelector"
+                                              Header="Target snapshot for restore or delete"
+                                              HorizontalAlignment="Stretch"
+                                              CornerRadius="4"
+                                              PlaceholderText="No snapshots available"
+                                              AutomationProperties.Name="Target Snapshot Selector"
+                                              AutomationProperties.AutomationId="SnapshotTargetSelector" />
                                     <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <Button CornerRadius="4" Click="OnRestoreLatestSnapshotClick" AutomationProperties.AutomationId="RestoreLatestSnapshotBtn">
+                                        <Button x:Name="RestoreSnapshotBtn" CornerRadius="4" Click="OnRestoreLatestSnapshotClick" AutomationProperties.AutomationId="RestoreLatestSnapshotBtn">
                                             <StackPanel Orientation="Horizontal" Spacing="6">
                                                 <FontIcon FontFamily="Segoe Fluent Icons" Glyph="&#xE7A7;" FontSize="13" />
-                                                <TextBlock Text="Restore Latest" />
+                                                <TextBlock Text="Restore Selected" />
                                             </StackPanel>
                                         </Button>
-                                        <Button CornerRadius="4" Click="OnDeleteLatestSnapshotClick" AutomationProperties.AutomationId="DeleteLatestSnapshotBtn">
+                                        <Button x:Name="DeleteSnapshotBtn" CornerRadius="4" Click="OnDeleteLatestSnapshotClick" AutomationProperties.AutomationId="DeleteLatestSnapshotBtn">
                                             <StackPanel Orientation="Horizontal" Spacing="6">
                                                 <FontIcon FontFamily="Segoe Fluent Icons" Glyph="&#xE74D;" FontSize="13" />
-                                                <TextBlock Text="Delete Latest" />
+                                                <TextBlock Text="Delete Selected" />
                                             </StackPanel>
                                         </Button>
                                     </StackPanel>

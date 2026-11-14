@@ -236,7 +236,34 @@ public sealed class QemuRuntimeInstaller
             ?? throw new InvalidOperationException("Failed to start 7-Zip extractor.");
         var stdoutTask = proc.StandardOutput.ReadToEndAsync(cancellationToken);
         var stderrTask = proc.StandardError.ReadToEndAsync(cancellationToken);
-        await Task.WhenAll(stdoutTask, stderrTask, proc.WaitForExitAsync(cancellationToken)).ConfigureAwait(false);
+        try
+        {
+            await Task.WhenAll(stdoutTask, stderrTask, proc.WaitForExitAsync(cancellationToken)).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            try
+            {
+                if (!proc.HasExited)
+                {
+                    proc.Kill(entireProcessTree: true);
+                }
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                using var cleanupCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                await proc.WaitForExitAsync(cleanupCts.Token).ConfigureAwait(false);
+            }
+            catch
+            {
+            }
+
+            throw;
+        }
         if (proc.ExitCode != 0)
         {
             var err = await stderrTask.ConfigureAwait(false);
